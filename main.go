@@ -466,7 +466,13 @@ func syncBuckets(
 
 		createdEntities = append(createdEntities, bucketID)
 
-		mustUpsertEntity(ctx, entitiesClient, bucketID, cfg.Types.BucketTypeID, bucketAttrs.Name)
+		// Build description with bucket metadata
+		description := buildBucketDescription(bucketAttrs)
+
+		// Build annotations from bucket attributes and labels
+		annotations := buildBucketAnnotations(bucketAttrs)
+
+		mustUpsertEntity(ctx, entitiesClient, bucketID, cfg.Types.BucketTypeID, bucketAttrs.Name, description, annotations)
 	}
 
 	logger.InfoContext(ctx, "Buckets processed", slog.Int("count", bucketCount))
@@ -474,7 +480,15 @@ func syncBuckets(
 }
 
 // mustUpsertEntity creates or updates an entity
-func mustUpsertEntity(ctx context.Context, client entitiescustomv1grpc.EntitiesServiceClient, id *entitiesv1.Identifier, typeID int32, name string) {
+func mustUpsertEntity(
+	ctx context.Context,
+	client entitiescustomv1grpc.EntitiesServiceClient,
+	id *entitiesv1.Identifier,
+	typeID int32,
+	name string,
+	description string,
+	annotations []*entitiesv1.Annotation,
+) {
 	logger := slog.Default()
 
 	// Skip SYNQ API call in dry-run mode
@@ -483,22 +497,154 @@ func mustUpsertEntity(ctx context.Context, client entitiescustomv1grpc.EntitiesS
 			slog.String("name", name),
 			slog.Int("type_id", int(typeID)),
 			slog.String("id", id.GetCustom().GetId()),
+			slog.String("description", truncate(description, 100)),
 		)
 		return
 	}
 
 	_, err := client.UpsertEntity(ctx, &entitiescustomv1.UpsertEntityRequest{
 		Entity: &entitiesv1.Entity{
-			Id:        id,
-			TypeId:    typeID,
-			Name:      name,
-			CreatedAt: timestamppb.Now(),
+			Id:          id,
+			TypeId:      typeID,
+			Name:        name,
+			Description: description,
+			Annotations: annotations,
+			CreatedAt:   timestamppb.Now(),
 		},
 	})
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to create entity", slog.String("name", name), slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+}
+
+// buildBucketDescription creates a markdown description for a bucket
+func buildBucketDescription(attrs *storage.BucketAttrs) string {
+	var desc strings.Builder
+
+	// Storage class and location
+	desc.WriteString(fmt.Sprintf("**Storage Class:** %s\n\n", attrs.StorageClass))
+	desc.WriteString(fmt.Sprintf("**Location:** %s\n\n", attrs.Location))
+
+	// Creation date
+	if !attrs.Created.IsZero() {
+		desc.WriteString(fmt.Sprintf("**Created:** %s\n\n", attrs.Created.Format("2006-01-02 15:04:05 UTC")))
+	}
+
+	// Versioning
+	if attrs.VersioningEnabled {
+		desc.WriteString("**Versioning:** Enabled\n\n")
+	}
+
+	// Lifecycle rules details
+	if len(attrs.Lifecycle.Rules) > 0 {
+		desc.WriteString(fmt.Sprintf("**Lifecycle Rules:** %d configured\n\n", len(attrs.Lifecycle.Rules)))
+		for i, rule := range attrs.Lifecycle.Rules {
+			desc.WriteString(fmt.Sprintf("**Rule %d:**\n", i+1))
+			desc.WriteString(fmt.Sprintf("- Action: %s", rule.Action.Type))
+			if rule.Action.StorageClass != "" {
+				desc.WriteString(fmt.Sprintf(" (to %s)", rule.Action.StorageClass))
+			}
+			desc.WriteString("\n")
+
+			// Add conditions
+			conditions := formatLifecycleConditions(rule.Condition)
+			if len(conditions) > 0 {
+				desc.WriteString("- Conditions:\n")
+				for _, cond := range conditions {
+					desc.WriteString(fmt.Sprintf("  - %s\n", cond))
+				}
+			}
+			desc.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSpace(desc.String())
+}
+
+// formatLifecycleConditions formats lifecycle rule conditions as human-readable strings
+func formatLifecycleConditions(cond storage.LifecycleCondition) []string {
+	var conditions []string
+
+	if cond.AllObjects {
+		conditions = append(conditions, "All objects")
+	}
+	if cond.AgeInDays > 0 {
+		conditions = append(conditions, fmt.Sprintf("Age >= %d days", cond.AgeInDays))
+	}
+	if !cond.CreatedBefore.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("Created before %s", cond.CreatedBefore.Format("2006-01-02")))
+	}
+	if cond.DaysSinceCustomTime > 0 {
+		conditions = append(conditions, fmt.Sprintf("Days since custom time >= %d", cond.DaysSinceCustomTime))
+	}
+	if cond.DaysSinceNoncurrentTime > 0 {
+		conditions = append(conditions, fmt.Sprintf("Days since noncurrent >= %d", cond.DaysSinceNoncurrentTime))
+	}
+	if cond.Liveness != 0 {
+		livenessStr := "Unknown"
+		if cond.Liveness == storage.Live {
+			livenessStr = "Live"
+		} else if cond.Liveness == storage.Archived {
+			livenessStr = "Archived"
+		}
+		conditions = append(conditions, fmt.Sprintf("Liveness: %s", livenessStr))
+	}
+	if len(cond.MatchesPrefix) > 0 {
+		conditions = append(conditions, fmt.Sprintf("Prefix matches: %v", cond.MatchesPrefix))
+	}
+	if len(cond.MatchesSuffix) > 0 {
+		conditions = append(conditions, fmt.Sprintf("Suffix matches: %v", cond.MatchesSuffix))
+	}
+	if len(cond.MatchesStorageClasses) > 0 {
+		conditions = append(conditions, fmt.Sprintf("Storage class in: %v", cond.MatchesStorageClasses))
+	}
+	if cond.NumNewerVersions > 0 {
+		conditions = append(conditions, fmt.Sprintf("Number of newer versions >= %d", cond.NumNewerVersions))
+	}
+	if !cond.NoncurrentTimeBefore.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("Noncurrent before %s", cond.NoncurrentTimeBefore.Format("2006-01-02")))
+	}
+	if !cond.CustomTimeBefore.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("Custom time before %s", cond.CustomTimeBefore.Format("2006-01-02")))
+	}
+
+	return conditions
+}
+
+// buildBucketAnnotations creates annotations from bucket attributes
+func buildBucketAnnotations(attrs *storage.BucketAttrs) []*entitiesv1.Annotation {
+	annotations := []*entitiesv1.Annotation{
+		{Name: "gcs.storage_class", Values: []string{attrs.StorageClass}},
+		{Name: "gcs.location", Values: []string{attrs.Location}},
+		{Name: "gcs.versioning_enabled", Values: []string{fmt.Sprintf("%t", attrs.VersioningEnabled)}},
+	}
+
+	// Add lifecycle rules annotation
+	if len(attrs.Lifecycle.Rules) > 0 {
+		annotations = append(annotations, &entitiesv1.Annotation{
+			Name:   "gcs.has_lifecycle_rules",
+			Values: []string{"true"},
+		})
+	}
+
+	// Add uniform bucket-level access status
+	if attrs.UniformBucketLevelAccess.Enabled {
+		annotations = append(annotations, &entitiesv1.Annotation{
+			Name:   "gcs.uniform_bucket_level_access",
+			Values: []string{"true"},
+		})
+	}
+
+	// Add user-defined labels from the bucket
+	for key, value := range attrs.Labels {
+		annotations = append(annotations, &entitiesv1.Annotation{
+			Name:   fmt.Sprintf("gcs.label.%s", key),
+			Values: []string{value},
+		})
+	}
+
+	return annotations
 }
 
 // ============================================================================
