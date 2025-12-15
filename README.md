@@ -1,12 +1,28 @@
 # synq-google-cloud-storage
 
-Integration which lists Google Cloud Storage buckets as custom entities in the SYNQ platform.
+SYNQ integration for Google Cloud Storage that automatically syncs your GCS buckets as custom entities in the SYNQ platform.
+
+## What It Does
+
+This integration:
+- **Discovers** all GCS buckets in your Google Cloud project
+- **Creates** custom entities in SYNQ for each bucket with rich metadata
+- **Syncs** bucket information including:
+  - Storage class and location
+  - Versioning status
+  - Lifecycle rules (with detailed conditions)
+  - Uniform bucket-level access settings
+  - User-defined labels
+- **Filters** buckets based on include/exclude patterns
+- **Auto-cleanup** removed buckets using entity groups
+
+Each bucket entity includes a detailed description with storage class, location, creation date, versioning status, and complete lifecycle rule configurations.
 
 ## Installation
 
 ### Download Pre-built Binaries
 
-Download the latest release for your platform from the [releases page](https://github.com/getsynq/synq-google-cloud-pubsub/releases).
+Download the latest release for your platform from the [releases page](https://github.com/getsynq/synq-google-cloud-storage/releases).
 
 **macOS (Intel):**
 ```bash
