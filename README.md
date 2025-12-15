@@ -1,4 +1,4 @@
-# integration-google-cloud-storage
+# synq-google-cloud-storage
 
 Integration which lists Google Cloud Storage buckets as custom entities in the SYNQ platform.
 
