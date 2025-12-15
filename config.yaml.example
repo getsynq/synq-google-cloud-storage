@@ -1,0 +1,43 @@
+# SYNQ API Configuration
+synq:
+  endpoint: "developer.synq.io:443"
+  oauth_url: "https://developer.synq.io/oauth2/token"
+
+# GCP Configuration
+gcp:
+  project_id: "synq-prod"
+  user_agent: "synq-pubsub-client-v1.0.0"
+  # Entity group ID for tracking resources (defaults to pubsub::<project_id>)
+  # entity_group_id: "pubsub::custom-group-id"
+
+# Custom Entity Type IDs
+types:
+  topic_type_id: 20
+  subscription_type_id: 21
+  # Optional: Custom icon paths (defaults to embedded icons/pubsub.svg)
+  # topic_icon: "path/to/custom-topic-icon.svg"
+  # subscription_icon: "path/to/custom-subscription-icon.svg"
+
+# Resource Filters
+filter:
+  # Topic filters
+  topics:
+    include: []  # Empty means include all
+    exclude: []  # Patterns to exclude
+
+  # Subscription filters
+  subscriptions:
+    include: []  # Empty means include all
+    exclude:
+      # Exclude auto-generated per-pod subscriptions
+      - '-[a-z0-9]{9,10}-[a-z0-9]{5}\.subscription$'
+
+# Relationship Management
+relationships:
+  enabled: false  # Set to true to enable topic->subscription relationships
+  filter:
+    include: []  # Empty means include all (format: "topic_id->subscription_id")
+    exclude: []  # Regex patterns to exclude relationship pairs
+    # Examples:
+    # include: ["important-topic->.*"]  # Only create relationships for important-topic
+    # exclude: ["test-.*->.*"]          # Skip relationships for test topics
