@@ -13,6 +13,7 @@ This integration:
   - Lifecycle rules (with detailed conditions)
   - Uniform bucket-level access settings
   - User-defined labels
+- **Creates lineage** relationships to Pub/Sub topics for bucket notification configurations
 - **Filters** buckets based on include/exclude patterns
 - **Auto-cleanup** removed buckets using entity groups
 
@@ -126,6 +127,16 @@ filter:
     # Examples:
     # include: ["prod-.*"]      # Only include buckets starting with prod-
     # exclude: ["test-.*"]      # Skip buckets starting with test-
+
+# Relationship Management (optional)
+relationships:
+  enabled: false  # Set to true to enable bucket->topic relationships for Pub/Sub notifications
+  filter:
+    include: []  # Empty means include all (format: "bucket_name->topic_id")
+    exclude: []  # Regex patterns to exclude relationship pairs
+    # Examples:
+    # include: ["important-bucket->.*"]  # Only create relationships for important-bucket
+    # exclude: ["test-.*->.*"]           # Skip relationships for test buckets
 ```
 
 **Defaults:**
@@ -135,6 +146,46 @@ filter:
 - User agent: `synq-gcs-client-v1.0.0`
 - Entity group ID: `gcs::<project_id>` (for automatic cleanup of removed resources)
 - Icons: Embedded SVG from `icons/gcs.svg`
+- Relationships: Disabled by default
+
+### Cross-Platform Lineage
+
+The integration can automatically create lineage relationships when buckets have notification configurations that send events to Pub/Sub topics:
+
+**GCS Bucket → Pub/Sub Topic** (bucket sends event notifications to topic)
+
+**Requirements:**
+- **Pub/Sub integration**: [synq-google-cloud-pubsub](https://github.com/getsynq/synq-google-cloud-pubsub) should be set up first
+- Links to non-existent `pubsub::<topic_id>` entities are skipped with debug logging
+
+**Configuration:**
+
+```yaml
+relationships:
+  enabled: true  # Enable bucket notification lineage
+  filter:
+    exclude: []  # Optional: exclude specific relationships
+```
+
+**Behavior:**
+- The integration automatically detects bucket notification configurations using the GCS Notifications API
+- Only creates relationships to Pub/Sub topics that exist as custom entities in SYNQ
+- If a Pub/Sub topic entity doesn't exist, the relationship is skipped with a debug log message
+- No sync failures - relationships are created opportunistically
+- Run the Pub/Sub integration first to ensure topic entities exist
+
+**Optional - Excluding Pub/Sub relationships:**
+
+While not required (missing entities are safely skipped), you can explicitly exclude Pub/Sub relationships or disable relationship scanning entirely:
+
+```yaml
+relationships:
+  enabled: false  # Disable relationship management completely
+
+  # Or exclude specific patterns:
+  # filter:
+  #   exclude: ["test-.*->.*"]  # Skip test bucket relationships
+```
 
 ### Logging Configuration
 
@@ -222,6 +273,11 @@ All configuration options are available as command-line flags. Flags have the hi
 **Filter flags:**
 - `--filter.buckets.include` - Bucket name patterns to include
 - `--filter.buckets.exclude` - Bucket name patterns to exclude
+
+**Relationship flags:**
+- `--relationships.enabled` - Enable bucket->topic relationships for notifications (default: false)
+- `--relationships.filter.include` - Relationship patterns to include
+- `--relationships.filter.exclude` - Relationship patterns to exclude
 
 **Type configuration flags:**
 - `--types.bucket-type-id` - SYNQ entity type ID for buckets (default: 40)

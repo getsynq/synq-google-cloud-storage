@@ -14,11 +14,12 @@ import (
 )
 
 type Config struct {
-	DryRun bool         `mapstructure:"dry_run"`
-	SYNQ   SYNQConfig   `mapstructure:"synq"`
-	GCP    GCPConfig    `mapstructure:"gcp"`
-	Types  TypesConfig  `mapstructure:"types"`
-	Filter FilterConfig `mapstructure:"filter"`
+	DryRun        bool                `mapstructure:"dry_run"`
+	SYNQ          SYNQConfig          `mapstructure:"synq"`
+	GCP           GCPConfig           `mapstructure:"gcp"`
+	Types         TypesConfig         `mapstructure:"types"`
+	Filter        FilterConfig        `mapstructure:"filter"`
+	Relationships RelationshipsConfig `mapstructure:"relationships"`
 }
 
 type SYNQConfig struct {
@@ -46,6 +47,11 @@ type FilterConfig struct {
 type FilterRules struct {
 	Include []string `mapstructure:"include"`
 	Exclude []string `mapstructure:"exclude"`
+}
+
+type RelationshipsConfig struct {
+	Enabled bool        `mapstructure:"enabled"`
+	Filter  FilterRules `mapstructure:"filter"`
 }
 
 // detectProjectID attempts to auto-detect the GCP project ID from the environment
@@ -121,6 +127,11 @@ func InitFlags() {
 	// Filter configuration
 	pflag.StringSlice("filter.buckets.include", []string{}, "Bucket name patterns to include (empty = all)")
 	pflag.StringSlice("filter.buckets.exclude", []string{}, "Bucket name patterns to exclude")
+
+	// Relationship configuration
+	pflag.Bool("relationships.enabled", false, "Enable bucket->topic relationships for notifications")
+	pflag.StringSlice("relationships.filter.include", []string{}, "Relationship patterns to include")
+	pflag.StringSlice("relationships.filter.exclude", []string{}, "Relationship patterns to exclude")
 }
 
 // LoadConfig loads configuration from file, environment variables, and flags
@@ -208,6 +219,9 @@ func setDefaults(v *viper.Viper) {
 
 	// Entity type defaults
 	v.SetDefault("types.bucket_type_id", 40)
+
+	// Relationship defaults
+	v.SetDefault("relationships.enabled", false)
 }
 
 // validateConfig validates required configuration fields

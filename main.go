@@ -177,7 +177,8 @@ func (c *synqClients) close() error {
 
 // filters holds all configured filters
 type filters struct {
-	buckets Filter
+	buckets       Filter
+	relationships Filter
 }
 
 // syncStats tracks sync statistics
@@ -205,7 +206,8 @@ func handleShutdown(ctx context.Context, cancel context.CancelFunc) {
 // buildFilters creates all filters from configuration
 func buildFilters(cfg *config.Config) *filters {
 	return &filters{
-		buckets: buildIncludeExcludeFilter(cfg.Filter.Buckets),
+		buckets:       buildIncludeExcludeFilter(cfg.Filter.Buckets),
+		relationships: buildIncludeExcludeFilter(cfg.Relationships.Filter),
 	}
 }
 
@@ -404,11 +406,33 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 		entitiesClient = clients.entities
 	}
 
-	// Sync buckets
-	createdEntities, bucketCount := syncBuckets(ctx, cfg, storageClient, entitiesClient, filters.buckets)
+	// List existing custom entities for relationship validation (only if relationships are enabled)
+	var customEntities map[string]bool
+	if cfg.Relationships.Enabled && entitiesClient != nil {
+		var err error
+		customEntities, err = listCustomEntities(ctx, entitiesClient)
+		if err != nil {
+			slog.Default().WarnContext(ctx, "Failed to list custom entities", slog.String("error", err.Error()))
+			customEntities = make(map[string]bool) // Use empty map on error
+		}
+	}
 
-	// Update entity groups only if not in dry-run mode
+	// Sync buckets
+	createdEntities, bucketCount, relationshipsToCreate := syncBuckets(
+		ctx,
+		cfg,
+		storageClient,
+		entitiesClient,
+		filters.buckets,
+		filters.relationships,
+		customEntities,
+	)
+
+	// Manage relationships and entity groups only if not in dry-run mode
 	if clients != nil {
+		if cfg.Relationships.Enabled {
+			manageRelationships(ctx, clients.relationships, createdEntities, relationshipsToCreate)
+		}
 		updateEntityGroup(ctx, cfg, clients.groups, createdEntities)
 	}
 
@@ -425,18 +449,21 @@ func syncBuckets(
 	storageClient *storage.Client,
 	entitiesClient entitiescustomv1grpc.EntitiesServiceClient,
 	bucketFilter Filter,
-) ([]*entitiesv1.Identifier, int) {
+	relationshipFilter Filter,
+	customEntities map[string]bool,
+) ([]*entitiesv1.Identifier, int, []*entitiescustomv1.Relationship) {
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Scanning GCS buckets")
 
 	var createdEntities []*entitiesv1.Identifier
+	var relationshipsToCreate []*entitiescustomv1.Relationship
 	bucketCount := 0
 
 	bucketsIterator := storageClient.Buckets(ctx, cfg.GCP.ProjectID)
 	for {
 		// Check for cancellation
 		if err := checkCancellation(ctx); err != nil {
-			return createdEntities, bucketCount
+			return createdEntities, bucketCount, relationshipsToCreate
 		}
 
 		bucketAttrs, err := bucketsIterator.Next()
@@ -473,11 +500,163 @@ func syncBuckets(
 		annotations := buildBucketAnnotations(bucketAttrs)
 
 		mustUpsertEntity(ctx, entitiesClient, bucketID, cfg.Types.BucketTypeID, bucketAttrs.Name, description, annotations)
+
+		// Scan bucket notifications to create relationships to Pub/Sub topics
+		if cfg.Relationships.Enabled {
+			logger.DebugContext(ctx, "Scanning bucket notifications", slog.String("bucket", bucketAttrs.Name))
+			bucket := storageClient.Bucket(bucketAttrs.Name)
+			notifications, err := bucket.Notifications(ctx)
+			if err != nil {
+				logger.WarnContext(ctx, "Failed to list bucket notifications",
+					slog.String("bucket", bucketAttrs.Name),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				logger.DebugContext(ctx, "Found bucket notifications",
+					slog.String("bucket", bucketAttrs.Name),
+					slog.Int("count", len(notifications)),
+				)
+				for _, notification := range notifications {
+					// notification.TopicID contains just the topic name
+					topicID := notification.TopicID
+					logger.DebugContext(ctx, "Processing notification",
+						slog.String("bucket", bucketAttrs.Name),
+						slog.String("topic_id", topicID),
+					)
+
+					relationshipKey := fmt.Sprintf("%s->%s", bucketAttrs.Name, topicID)
+
+					if relationshipFilter.Accept(relationshipKey) {
+						pubsubTopicCustomID := fmt.Sprintf("pubsub::%s", topicID)
+
+						// Check if Pub/Sub topic entity exists (Pub/Sub topics are custom entities)
+						if customEntities == nil || customEntities[pubsubTopicCustomID] {
+							pubsubTopicID := &entitiesv1.Identifier{
+								Id: &entitiesv1.Identifier_Custom{
+									Custom: &entitiesv1.CustomIdentifier{
+										Id: pubsubTopicCustomID,
+									},
+								},
+							}
+
+							relationshipsToCreate = append(relationshipsToCreate, &entitiescustomv1.Relationship{
+								Upstream:   bucketID,
+								Downstream: pubsubTopicID,
+							})
+
+							logger.DebugContext(ctx, "Queued bucket notification relationship",
+								slog.String("bucket", bucketAttrs.Name),
+								slog.String("topic", topicID),
+							)
+						} else {
+							logger.DebugContext(ctx, "Skipping bucket notification relationship - Pub/Sub topic entity not found",
+								slog.String("bucket", bucketAttrs.Name),
+								slog.String("topic", topicID),
+							)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	logger.InfoContext(ctx, "Buckets processed", slog.Int("count", bucketCount))
-	return createdEntities, bucketCount
+	return createdEntities, bucketCount, relationshipsToCreate
 }
+
+// ============================================================================
+// Relationship Management
+// ============================================================================
+
+// manageRelationships creates and deletes relationships as needed
+func manageRelationships(
+	ctx context.Context,
+	client entitiescustomv1grpc.RelationshipsServiceClient,
+	createdEntities []*entitiesv1.Identifier,
+	relationshipsToCreate []*entitiescustomv1.Relationship,
+) {
+	logger := slog.Default()
+	logger.InfoContext(ctx, "Retrieving existing relationships")
+
+	listResp, err := client.ListRelationships(ctx, &entitiescustomv1.ListRelationshipsRequest{
+		Ids: createdEntities,
+	})
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to list relationships", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	// Deduplicate relationships
+	toCreate, toDelete := deduplicateRelationships(relationshipsToCreate, listResp.Relationships)
+
+	logger.InfoContext(ctx, "Managing relationships",
+		slog.Int("to_create", len(toCreate)),
+		slog.Int("to_delete", len(toDelete)),
+	)
+
+	if len(toCreate) > 0 {
+		_, err = client.UpsertRelationships(ctx, &entitiescustomv1.UpsertRelationshipsRequest{
+			Relationships: toCreate,
+		})
+		if err != nil {
+			logger.ErrorContext(ctx, "Failed to create relationships", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.InfoContext(ctx, "Relationships created", slog.Int("count", len(toCreate)))
+	}
+
+	if len(toDelete) > 0 {
+		_, err = client.DeleteRelationships(ctx, &entitiescustomv1.DeleteRelationshipsRequest{
+			Relationships: toDelete,
+		})
+		if err != nil {
+			logger.ErrorContext(ctx, "Failed to delete relationships", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.InfoContext(ctx, "Relationships deleted", slog.Int("count", len(toDelete)))
+	}
+}
+
+// deduplicateRelationships compares desired relationships with existing ones
+// Returns relationships to create and relationships to delete
+func deduplicateRelationships(
+	desired []*entitiescustomv1.Relationship,
+	existing []*entitiescustomv1.Relationship,
+) ([]*entitiescustomv1.Relationship, []*entitiescustomv1.Relationship) {
+	// Build a map of existing relationships for quick lookup
+	existingMap := make(map[string]struct{})
+	for _, rel := range existing {
+		existingMap[rel.String()] = struct{}{}
+	}
+
+	// Build a map of desired relationships
+	desiredMap := make(map[string]*entitiescustomv1.Relationship)
+	for _, rel := range desired {
+		desiredMap[rel.String()] = rel
+	}
+
+	// Find relationships to create (in desired but not in existing)
+	var toCreate []*entitiescustomv1.Relationship
+	for key, rel := range desiredMap {
+		if _, exists := existingMap[key]; !exists {
+			toCreate = append(toCreate, rel)
+		}
+	}
+
+	// Find relationships to delete (in existing but not in desired)
+	var toDelete []*entitiescustomv1.Relationship
+	for _, rel := range existing {
+		if _, desired := desiredMap[rel.String()]; !desired {
+			toDelete = append(toDelete, rel)
+		}
+	}
+
+	return toCreate, toDelete
+}
+
+// ============================================================================
+// Entity Management
+// ============================================================================
 
 // mustUpsertEntity creates or updates an entity
 func mustUpsertEntity(
@@ -747,4 +926,25 @@ func truncate(s string, maxLen int) string {
 		return string(runes[:maxLen])
 	}
 	return s
+}
+
+// listCustomEntities retrieves all custom entities and returns them as a map for efficient lookups
+func listCustomEntities(ctx context.Context, client entitiescustomv1grpc.EntitiesServiceClient) (map[string]bool, error) {
+	if client == nil {
+		return nil, nil // In dry-run mode, return nil
+	}
+
+	resp, err := client.ListEntities(ctx, &entitiescustomv1.ListEntitiesRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list entities: %w", err)
+	}
+
+	entityMap := make(map[string]bool)
+	for _, entity := range resp.GetEntities() {
+		if customID := entity.GetId().GetCustom(); customID != nil {
+			entityMap[customID.GetId()] = true
+		}
+	}
+
+	return entityMap, nil
 }

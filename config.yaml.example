@@ -34,10 +34,10 @@ filter:
 
 # Relationship Management
 relationships:
-  enabled: false  # Set to true to enable topic->subscription relationships
+  enabled: false  # Set to true to enable bucket->topic relationships for Pub/Sub notifications
   filter:
-    include: []  # Empty means include all (format: "topic_id->subscription_id")
+    include: []  # Empty means include all (format: "bucket_name->topic_id")
     exclude: []  # Regex patterns to exclude relationship pairs
     # Examples:
-    # include: ["important-topic->.*"]  # Only create relationships for important-topic
-    # exclude: ["test-.*->.*"]          # Skip relationships for test topics
+    # include: ["important-bucket->.*"]  # Only create relationships for important-bucket
+    # exclude: ["test-.*->.*"]           # Skip relationships for test buckets
