@@ -14,10 +14,10 @@ import (
 )
 
 type Config struct {
-	DryRun bool        `mapstructure:"dry_run"`
-	SYNQ   SYNQConfig  `mapstructure:"synq"`
-	GCP    GCPConfig   `mapstructure:"gcp"`
-	Types  TypesConfig `mapstructure:"types"`
+	DryRun bool         `mapstructure:"dry_run"`
+	SYNQ   SYNQConfig   `mapstructure:"synq"`
+	GCP    GCPConfig    `mapstructure:"gcp"`
+	Types  TypesConfig  `mapstructure:"types"`
 	Filter FilterConfig `mapstructure:"filter"`
 }
 
@@ -47,7 +47,6 @@ type FilterRules struct {
 	Include []string `mapstructure:"include"`
 	Exclude []string `mapstructure:"exclude"`
 }
-
 
 // detectProjectID attempts to auto-detect the GCP project ID from the environment
 func detectProjectID(ctx context.Context) string {
