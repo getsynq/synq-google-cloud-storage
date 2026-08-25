@@ -57,6 +57,8 @@ github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
 github.com/getsynq/quality-oauth-go v0.1.0 h1:IPovPqIKo/mljdJSocdvwi/85ubLgovfM4eAlkg91MY=
 github.com/getsynq/quality-oauth-go v0.1.0/go.mod h1:xCkAQOCAtPzdErgmBvoPq3ZklQQhwO+5qECiIfySyo4=
+github.com/getsynq/quality-oauth-go v0.1.1 h1:o7DFPc8LnXusuQHGyxRhQ1dYe+eKrnf9jXf86wVVKUw=
+github.com/getsynq/quality-oauth-go v0.1.1/go.mod h1:xCkAQOCAtPzdErgmBvoPq3ZklQQhwO+5qECiIfySyo4=
 github.com/go-jose/go-jose/v4 v4.1.1 h1:JYhSgy4mXXzAdF3nUx3ygx347LRXJRrpgyU3adRmkAI=
 github.com/go-jose/go-jose/v4 v4.1.1/go.mod h1:BdsZGqgdO3b6tTc6LSE56wcDbMMLuPsw5d4ZD5f94kA=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
