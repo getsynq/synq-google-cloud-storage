@@ -61,3 +61,28 @@ func TestNothingIsDeletedWhenTheRunComputedNothing(t *testing.T) {
 
 	assert.Empty(t, edgeKeys(toDelete))
 }
+
+// TestAStaleNotificationEdgeIsDeleted keeps the reconciliation this tool is for:
+// a notification removed from the bucket leaves an edge behind, and that edge is
+// this tool's own shape, so it goes.
+func TestAStaleNotificationEdgeIsDeleted(t *testing.T) {
+	desired := []*entitiescustomv1.Relationship{
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+	}
+	existing := []*entitiescustomv1.Relationship{
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts.retired"),
+	}
+
+	_, toDelete := deduplicateRelationships(desired, existing)
+
+	assert.Equal(t, []string{"gcs::artefacts->pubsub::prod.gcs.artefacts.retired"}, edgeKeys(toDelete))
+}
+
+// TestOnlyBucketToTopicIsOwned pins the shape test itself.
+func TestOnlyBucketToTopicIsOwned(t *testing.T) {
+	assert.True(t, ownsRelationship(edge("gcs::artefacts", "pubsub::prod.gcs.artefacts")))
+	assert.False(t, ownsRelationship(edge("gcs::artefacts", "service::consumer")))
+	assert.False(t, ownsRelationship(edge("service::producer", "gcs::artefacts")))
+	assert.False(t, ownsRelationship(edge("gcs::artefacts", "gcs::mirror")))
+}

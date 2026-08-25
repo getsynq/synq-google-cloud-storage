@@ -643,15 +643,37 @@ func deduplicateRelationships(
 		}
 	}
 
+	// A run that computed nothing withdraws nothing. Relationships can be on while
+	// no bucket has a notification configured, and treating that as "everything
+	// stored is unwanted" is how a sync deletes lineage it never published.
+	if len(desired) == 0 {
+		return toCreate, nil
+	}
+
 	// Find relationships to delete (in existing but not in desired)
 	var toDelete []*entitiescustomv1.Relationship
 	for _, rel := range existing {
+		if !ownsRelationship(rel) {
+			continue
+		}
 		if _, desired := desiredMap[rel.String()]; !desired {
 			toDelete = append(toDelete, rel)
 		}
 	}
 
 	return toCreate, toDelete
+}
+
+// ownsRelationship reports whether this integration is the producer of rel: an
+// edge from a bucket to a Pub/Sub topic, which is the only shape it publishes.
+//
+// The stored edges are listed by bucket, so the answer also carries everything
+// else touching that bucket — a service catalog's link to the service that reads
+// it, a warehouse table loaded from it. Withdrawing those makes every run undo
+// another producer's work.
+func ownsRelationship(rel *entitiescustomv1.Relationship) bool {
+	return strings.HasPrefix(rel.Upstream.GetCustom().GetId(), "gcs::") &&
+		strings.HasPrefix(rel.Downstream.GetCustom().GetId(), "pubsub::")
 }
 
 // ============================================================================
