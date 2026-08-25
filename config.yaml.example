@@ -1,11 +1,21 @@
-# SYNQ API Configuration
-synq:
-  endpoint: "developer.synq.io:443"
-  oauth_url: "https://developer.synq.io/oauth2/token"
+# Coalesce Quality configuration.
+#
+# Everything here is optional. The deployment defaults to the EU region, or to
+# the one you last logged into, and credentials normally come from the
+# environment or from `synq-google-cloud-storage auth login`.
+quality:
+  # region: "us"                      # eu, us or au
+  # endpoint: "api.us.synq.io:443"    # overrides region
+  # client_id: ""                     # prefer QUALITY_CLIENT_ID
+  # client_secret: ""                 # prefer QUALITY_CLIENT_SECRET
+  # token: ""                         # a pre-issued access token
+
+# The `synq:` section this replaced is still read, and its values are used for
+# anything `quality:` leaves unset.
 
 # GCP Configuration
 gcp:
-  project_id: "synq-prod"
+  project_id: "my-gcp-project"
   user_agent: "synq-pubsub-client-v1.0.0"
   # Entity group ID for tracking resources (defaults to pubsub::<project_id>)
   # entity_group_id: "pubsub::custom-group-id"
