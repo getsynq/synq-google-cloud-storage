@@ -718,12 +718,12 @@ func buildBucketDescription(attrs *storage.BucketAttrs) string {
 	var desc strings.Builder
 
 	// Storage class and location
-	desc.WriteString(fmt.Sprintf("**Storage Class:** %s\n\n", attrs.StorageClass))
-	desc.WriteString(fmt.Sprintf("**Location:** %s\n\n", attrs.Location))
+	_, _ = fmt.Fprintf(&desc, "**Storage Class:** %s\n\n", attrs.StorageClass)
+	_, _ = fmt.Fprintf(&desc, "**Location:** %s\n\n", attrs.Location)
 
 	// Creation date
 	if !attrs.Created.IsZero() {
-		desc.WriteString(fmt.Sprintf("**Created:** %s\n\n", attrs.Created.Format("2006-01-02 15:04:05 UTC")))
+		_, _ = fmt.Fprintf(&desc, "**Created:** %s\n\n", attrs.Created.Format("2006-01-02 15:04:05 UTC"))
 	}
 
 	// Versioning
@@ -733,12 +733,12 @@ func buildBucketDescription(attrs *storage.BucketAttrs) string {
 
 	// Lifecycle rules details
 	if len(attrs.Lifecycle.Rules) > 0 {
-		desc.WriteString(fmt.Sprintf("**Lifecycle Rules:** %d configured\n\n", len(attrs.Lifecycle.Rules)))
+		_, _ = fmt.Fprintf(&desc, "**Lifecycle Rules:** %d configured\n\n", len(attrs.Lifecycle.Rules))
 		for i, rule := range attrs.Lifecycle.Rules {
-			desc.WriteString(fmt.Sprintf("**Rule %d:**\n", i+1))
-			desc.WriteString(fmt.Sprintf("- Action: %s", rule.Action.Type))
+			_, _ = fmt.Fprintf(&desc, "**Rule %d:**\n", i+1)
+			_, _ = fmt.Fprintf(&desc, "- Action: %s", rule.Action.Type)
 			if rule.Action.StorageClass != "" {
-				desc.WriteString(fmt.Sprintf(" (to %s)", rule.Action.StorageClass))
+				_, _ = fmt.Fprintf(&desc, " (to %s)", rule.Action.StorageClass)
 			}
 			desc.WriteString("\n")
 
@@ -747,7 +747,7 @@ func buildBucketDescription(attrs *storage.BucketAttrs) string {
 			if len(conditions) > 0 {
 				desc.WriteString("- Conditions:\n")
 				for _, cond := range conditions {
-					desc.WriteString(fmt.Sprintf("  - %s\n", cond))
+					_, _ = fmt.Fprintf(&desc, "  - %s\n", cond)
 				}
 			}
 			desc.WriteString("\n")
@@ -778,9 +778,10 @@ func formatLifecycleConditions(cond storage.LifecycleCondition) []string {
 	}
 	if cond.Liveness != 0 {
 		livenessStr := "Unknown"
-		if cond.Liveness == storage.Live {
+		switch cond.Liveness {
+		case storage.Live:
 			livenessStr = "Live"
-		} else if cond.Liveness == storage.Archived {
+		case storage.Archived:
 			livenessStr = "Archived"
 		}
 		conditions = append(conditions, fmt.Sprintf("Liveness: %s", livenessStr))

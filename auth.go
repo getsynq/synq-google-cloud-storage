@@ -210,19 +210,19 @@ Coalesce Quality tool on this machine can use it.`,
 		if result, err := app.MigrateLegacyCredentials(target, nil); err != nil {
 			return err
 		} else if result.Migrated() {
-			fmt.Fprintf(cmd.OutOrStdout(), "Adopted the existing credential for %s from the previous store layout.\n", target)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Adopted the existing credential for %s from the previous store layout.\n", target)
 		}
 
 		tok, err := app.Login(cmd.Context(), target)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "\nAuthenticated against %s.\n", target)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nAuthenticated against %s.\n", target)
 		if tok.Workspace != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "Workspace: %s\n", tok.Workspace)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Workspace: %s\n", tok.Workspace)
 		}
 		if missing := qualityoauth.MissingScopes(tok.Scopes, writeScopes); len(missing) > 0 {
-			fmt.Fprintf(cmd.OutOrStdout(),
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 				"\nThis account cannot publish entities; %v were not granted.\n"+
 					"Syncs will work with --dry-run. Publishing needs ROLE_OWNER (Admin) or above.\n", missing)
 		}
@@ -240,7 +240,7 @@ var authStatusCmd = &cobra.Command{
 		}
 		out := cmd.OutOrStdout()
 		if len(statuses) == 0 {
-			fmt.Fprintf(out, "No stored credentials. Run `%s auth login`.\n", toolName)
+			_, _ = fmt.Fprintf(out, "No stored credentials. Run `%s auth login`.\n", toolName)
 			return nil
 		}
 		for _, s := range statuses {
@@ -270,7 +270,7 @@ var authStatusCmd = &cobra.Command{
 			default:
 				writes = "read-only"
 			}
-			fmt.Fprintf(out, "%s\tflow=%s\tprofile=%s\tworkspace=%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(out, "%s\tflow=%s\tprofile=%s\tworkspace=%s\t%s\t%s\n",
 				where, flow, s.Profile, s.Workspace, state, writes)
 		}
 		return nil
@@ -290,10 +290,10 @@ var authLogoutCmd = &cobra.Command{
 			return err
 		}
 		if !removed {
-			fmt.Fprintf(cmd.OutOrStdout(), "No stored credential for %s.\n", target)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No stored credential for %s.\n", target)
 			return nil
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Removed the stored credential for %s.\n", target)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Removed the stored credential for %s.\n", target)
 		return nil
 	},
 }
@@ -307,7 +307,7 @@ func targetFromCommand(cmd *cobra.Command) (qualityoauth.Target, error) {
 	if err != nil {
 		// A sync needs a GCP project; logging in does not. Fall back to the
 		// deployment sources that do not depend on the file parsing.
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		return qualityoauth.Sources{}.Resolve()
 	}
 	return resolveTarget(cfg)
