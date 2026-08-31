@@ -94,8 +94,10 @@ synq-google-cloud-storage auth logout
 ```
 
 The credential is cached under `~/.synq/oauth/`, partitioned by deployment, and
-**shared with the other Coalesce Quality tools** — so a login done by `synqctl`
-or `synq-recon` already serves this integration, and the other way round.
+**shared with the other Coalesce Quality tools** — so a login done by
+[`synqcli`](https://github.com/getsynq/synqcli) or
+[`synq-recon`](https://github.com/getsynq/synq-recon) already serves this
+integration, and the other way round.
 
 Publishing entities needs `SCOPE_ENTITY_EDIT`, `SCOPE_ENTITY_TYPE_EDIT` and
 `SCOPE_LINEAGE_EDIT`, which reach a personal token through the Admin role and
