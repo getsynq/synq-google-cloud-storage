@@ -8,8 +8,8 @@ before:
     - go mod tidy
 
 builds:
-  - id: synq-google-cloud-pubsub
-    binary: synq-google-cloud-pubsub
+  - id: synq-google-cloud-storage
+    binary: synq-google-cloud-storage
     env:
       - CGO_ENABLED=0
     goos:
@@ -86,17 +86,17 @@ changelog:
 release:
   github:
     owner: getsynq
-    name: synq-google-cloud-pubsub
+    name: synq-google-cloud-storage
   draft: false
   prerelease: auto
   mode: replace
   name_template: "v{{.Version}}"
   header: |
-    ## Google Cloud Pub/Sub Integration for SYNQ
+    ## Google Cloud Storage Integration for Coalesce Quality
 
     Release v{{ .Version }}
   footer: |
-    **Full Changelog**: https://github.com/getsynq/synq-google-cloud-pubsub/compare/{{ .PreviousTag }}...{{ .Tag }}
+    **Full Changelog**: https://github.com/getsynq/synq-google-cloud-storage/compare/{{ .PreviousTag }}...{{ .Tag }}
 
     ## Installation
 
@@ -105,27 +105,27 @@ release:
     ### macOS
     ```bash
     # Intel
-    curl -LO https://github.com/getsynq/synq-google-cloud-pubsub/releases/download/{{ .Tag }}/synq-google-cloud-pubsub_{{ .Version }}_darwin_amd64.tar.gz
-    tar -xzf synq-google-cloud-pubsub_{{ .Version }}_darwin_amd64.tar.gz
+    curl -LO https://github.com/getsynq/synq-google-cloud-storage/releases/download/{{ .Tag }}/synq-google-cloud-storage_{{ .Version }}_darwin_amd64.tar.gz
+    tar -xzf synq-google-cloud-storage_{{ .Version }}_darwin_amd64.tar.gz
 
     # Apple Silicon
-    curl -LO https://github.com/getsynq/synq-google-cloud-pubsub/releases/download/{{ .Tag }}/synq-google-cloud-pubsub_{{ .Version }}_darwin_arm64.tar.gz
-    tar -xzf synq-google-cloud-pubsub_{{ .Version }}_darwin_arm64.tar.gz
+    curl -LO https://github.com/getsynq/synq-google-cloud-storage/releases/download/{{ .Tag }}/synq-google-cloud-storage_{{ .Version }}_darwin_arm64.tar.gz
+    tar -xzf synq-google-cloud-storage_{{ .Version }}_darwin_arm64.tar.gz
     ```
 
     ### Linux
     ```bash
     # AMD64
-    curl -LO https://github.com/getsynq/synq-google-cloud-pubsub/releases/download/{{ .Tag }}/synq-google-cloud-pubsub_{{ .Version }}_linux_amd64.tar.gz
-    tar -xzf synq-google-cloud-pubsub_{{ .Version }}_linux_amd64.tar.gz
+    curl -LO https://github.com/getsynq/synq-google-cloud-storage/releases/download/{{ .Tag }}/synq-google-cloud-storage_{{ .Version }}_linux_amd64.tar.gz
+    tar -xzf synq-google-cloud-storage_{{ .Version }}_linux_amd64.tar.gz
 
     # ARM64
-    curl -LO https://github.com/getsynq/synq-google-cloud-pubsub/releases/download/{{ .Tag }}/synq-google-cloud-pubsub_{{ .Version }}_linux_arm64.tar.gz
-    tar -xzf synq-google-cloud-pubsub_{{ .Version }}_linux_arm64.tar.gz
+    curl -LO https://github.com/getsynq/synq-google-cloud-storage/releases/download/{{ .Tag }}/synq-google-cloud-storage_{{ .Version }}_linux_arm64.tar.gz
+    tar -xzf synq-google-cloud-storage_{{ .Version }}_linux_arm64.tar.gz
     ```
 
     ### Windows
     ```powershell
     # Download and extract the zip file
-    curl -LO https://github.com/getsynq/synq-google-cloud-pubsub/releases/download/{{ .Tag }}/synq-google-cloud-pubsub_{{ .Version }}_windows_amd64.zip
+    curl -LO https://github.com/getsynq/synq-google-cloud-storage/releases/download/{{ .Tag }}/synq-google-cloud-storage_{{ .Version }}_windows_amd64.zip
     ```

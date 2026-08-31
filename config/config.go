@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,24 +10,100 @@ import (
 	"strings"
 
 	"cloud.google.com/go/compute/metadata"
+	qualityoauth "github.com/getsynq/quality-oauth-go"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	DryRun        bool                `mapstructure:"dry_run"`
-	SYNQ          SYNQConfig          `mapstructure:"synq"`
+	DryRun bool `mapstructure:"dry_run"`
+	// Quality is the Coalesce Quality deployment and credentials. The `synq`
+	// section is its predecessor and is still read into SYNQ, then merged in as
+	// the lower-precedence source, because it is in existing config files.
+	Quality       QualityConfig       `mapstructure:"quality"`
+	SYNQ          QualityConfig       `mapstructure:"synq"`
 	GCP           GCPConfig           `mapstructure:"gcp"`
 	Types         TypesConfig         `mapstructure:"types"`
 	Filter        FilterConfig        `mapstructure:"filter"`
 	Relationships RelationshipsConfig `mapstructure:"relationships"`
+	// DeprecatedKeys are the superseded config keys this load actually used, so
+	// the caller can name them once instead of warning per key or not at all.
+	DeprecatedKeys []string `mapstructure:"-"`
 }
 
-type SYNQConfig struct {
+// flagValue reads a flag the user typed, or "" when it was not set. It is only
+// ever the typed value: a flag's default belongs to the defaults tier, not to
+// the flag tier, and reading it here would make a default outrank the
+// environment.
+func flagValue(name string) string {
+	flag := pflag.CommandLine.Lookup(name)
+	if flag == nil || !flag.Changed {
+		return ""
+	}
+	return flag.Value.String()
+}
+
+type QualityConfig struct {
 	ClientID     string `mapstructure:"client_id"`
 	ClientSecret string `mapstructure:"client_secret"`
-	Endpoint     string `mapstructure:"endpoint"`
-	OAuthURL     string `mapstructure:"oauth_url"`
+	// Token is a pre-issued access token, used as-is.
+	Token string `mapstructure:"token"`
+	// Endpoint is host:port of the API, overriding Region.
+	Endpoint string `mapstructure:"endpoint"`
+	// Region names a deployment: eu, us or au.
+	Region string `mapstructure:"region"`
+	// OAuthURL overrides the token endpoint the client-credentials grant uses.
+	// It is derived from the deployment otherwise, and only a self-hosted
+	// deployment that serves the authorization server from another host needs it.
+	OAuthURL string `mapstructure:"oauth_url"`
+	// RegionFlag and EndpointFlag are what the user typed. They are held apart
+	// from the file values because they outrank the environment, while the file
+	// values do not.
+	RegionFlag   string `mapstructure:"-"`
+	EndpointFlag string `mapstructure:"-"`
+}
+
+// hasCredential reports whether this section authenticates on its own. The two
+// kinds are alternatives, not fields to combine: `connect` prefers a client pair
+// over a token, so a section that supplies either has settled the question.
+func (q QualityConfig) hasCredential() bool {
+	return q.Token != "" || (q.ClientID != "" && q.ClientSecret != "")
+}
+
+// namesDeployment reports whether this section points at a deployment. Endpoint
+// and region are likewise alternatives: the endpoint wins where both are given.
+func (q QualityConfig) namesDeployment() bool {
+	return q.Endpoint != "" || q.Region != ""
+}
+
+// merge fills empty fields from a lower-precedence source, and reports which
+// deprecated keys were used so the caller can say so once.
+//
+// Credentials and the deployment are taken as a whole rather than field by
+// field. Merging those field-wise hands the outcome to the section that is meant
+// to lose: a legacy client pair beside a promoted token is the pair that
+// authenticates, and a legacy endpoint beside a promoted region is the endpoint
+// that is dialled. A half-filled promoted section is still completed from the
+// older one, which is what makes a split across the two sections keep working.
+func (q *QualityConfig) merge(older QualityConfig) []string {
+	var used []string
+	take := func(dst *string, src, name string) {
+		if *dst == "" && src != "" {
+			*dst = src
+			used = append(used, "synq."+name)
+		}
+	}
+	if !q.hasCredential() {
+		take(&q.ClientID, older.ClientID, "client_id")
+		take(&q.ClientSecret, older.ClientSecret, "client_secret")
+		take(&q.Token, older.Token, "token")
+	}
+	if !q.namesDeployment() {
+		take(&q.Endpoint, older.Endpoint, "endpoint")
+		take(&q.Region, older.Region, "region")
+	}
+	take(&q.OAuthURL, older.OAuthURL, "oauth_url")
+	return used
 }
 
 type GCPConfig struct {
@@ -107,13 +184,25 @@ func InitFlags() {
 	pflag.StringP("config", "c", "config.yaml", "Path to config file")
 
 	// General flags
-	pflag.Bool("dry-run", false, "Dry-run mode: scan GCP resources but don't call SYNQ API")
+	pflag.Bool("dry-run", false, "Dry-run mode: scan GCP resources but don't call the Coalesce Quality API")
 
-	// SYNQ configuration
-	pflag.String("synq.client-id", "", "SYNQ API client ID (env: SYNQ_CLIENT_ID)")
-	pflag.String("synq.client-secret", "", "SYNQ API client secret (env: SYNQ_CLIENT_SECRET)")
-	pflag.String("synq.endpoint", "developer.synq.io:443", "SYNQ API endpoint")
-	pflag.String("synq.oauth-url", "https://developer.synq.io/oauth2/token", "SYNQ OAuth2 token URL")
+	// Coalesce Quality configuration
+	pflag.String("region", "", "Coalesce Quality deployment: "+strings.Join(qualityoauth.RegionNames(), ", ")+" (env: QUALITY_REGION)")
+	pflag.String("endpoint", "", "Coalesce Quality API endpoint, host:port, overriding --region (env: QUALITY_API_ENDPOINT)")
+	pflag.String("client-id", "", "Client credential id (env: QUALITY_CLIENT_ID)")
+	pflag.String("client-secret", "", "Client credential secret (env: QUALITY_CLIENT_SECRET)")
+
+	// The names these replaced. They still work, and are hidden rather than
+	// removed because they are in existing scripts and CI configuration.
+	pflag.String("synq.client-id", "", "Deprecated alias for --client-id")
+	pflag.String("synq.client-secret", "", "Deprecated alias for --client-secret")
+	pflag.String("synq.endpoint", "", "Deprecated alias for --endpoint")
+	pflag.String("synq.oauth-url", "", "Deprecated: the token endpoint is derived from the deployment")
+	for _, name := range []string{"synq.client-id", "synq.client-secret", "synq.endpoint", "synq.oauth-url"} {
+		if flag := pflag.CommandLine.Lookup(name); flag != nil {
+			flag.Hidden = true
+		}
+	}
 
 	// GCP configuration
 	pflag.String("gcp.project-id", "", "GCP project ID (auto-detected if not set)")
@@ -121,7 +210,7 @@ func InitFlags() {
 	pflag.String("gcp.entity-group-id", "", "Entity group ID (defaults to gcs::<project_id>)")
 
 	// Entity type configuration
-	pflag.Int32("types.bucket-type-id", 40, "SYNQ entity type ID for buckets")
+	pflag.Int32("types.bucket-type-id", 40, "Custom entity type ID for buckets")
 	pflag.String("types.bucket-icon", "", "Path to custom bucket icon SVG")
 
 	// Filter configuration
@@ -166,9 +255,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	v.AutomaticEnv()
 
-	// Manually bind specific env vars for backward compatibility
-	_ = v.BindEnv("synq.client_id", "SYNQ_CLIENT_ID")
-	_ = v.BindEnv("synq.client_secret", "SYNQ_CLIENT_SECRET")
+	// Credentials and deployment from the environment are read by the auth
+	// library, which prefers the QUALITY_ names and falls back to the SYNQ_ ones.
+	// Binding them here as well would give one of the two settings a different
+	// precedence from the rest.
 	_ = v.BindEnv("gcp.project_id", "GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT")
 
 	// Bind flags
@@ -187,6 +277,27 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
+	// The flags outrank the environment; the file values do not, so they are
+	// carried separately and resolved by the auth library.
+	//
+	// Every deprecated alias is read by name here. Viper cannot unmarshal a
+	// dashed sub-key such as `synq.client-id` onto the `client_id` field it
+	// names, so an alias that is not in this block resolves to nothing.
+	cfg.Quality.RegionFlag = flagValue("region")
+	cfg.Quality.EndpointFlag = cmp.Or(flagValue("endpoint"), flagValue("synq.endpoint"))
+	if id := cmp.Or(flagValue("client-id"), flagValue("synq.client-id")); id != "" {
+		cfg.Quality.ClientID = id
+	}
+	if secret := cmp.Or(flagValue("client-secret"), flagValue("synq.client-secret")); secret != "" {
+		cfg.Quality.ClientSecret = secret
+	}
+	if url := flagValue("synq.oauth-url"); url != "" {
+		cfg.Quality.OAuthURL = url
+	}
+	if deprecated := cfg.Quality.merge(cfg.SYNQ); len(deprecated) > 0 {
+		cfg.DeprecatedKeys = deprecated
+	}
+
 	// Auto-detect project ID if not set
 	if cfg.GCP.ProjectID == "" {
 		cfg.GCP.ProjectID = detectProjectID(context.Background())
@@ -197,9 +308,12 @@ func LoadConfig(configPath string) (*Config, error) {
 		cfg.GCP.EntityGroupID = fmt.Sprintf("gcs::%s", cfg.GCP.ProjectID)
 	}
 
-	// Validate required fields
+	// Validate required fields. The parsed config is returned alongside the
+	// error: what fails here is what a sync needs, and an auth subcommand needs
+	// only the deployment, which parsed fine. Callers that need a valid config
+	// must still check the error.
 	if err := validateConfig(cfg); err != nil {
-		return nil, err
+		return cfg, err
 	}
 
 	return cfg, nil
@@ -209,10 +323,6 @@ func LoadConfig(configPath string) (*Config, error) {
 func setDefaults(v *viper.Viper) {
 	// General defaults
 	v.SetDefault("dry_run", false)
-
-	// SYNQ defaults
-	v.SetDefault("synq.endpoint", "developer.synq.io:443")
-	v.SetDefault("synq.oauth_url", "https://developer.synq.io/oauth2/token")
 
 	// GCP defaults
 	v.SetDefault("gcp.user_agent", "synq-gcs-client-v1.0.0")
@@ -226,18 +336,10 @@ func setDefaults(v *viper.Viper) {
 
 // validateConfig validates required configuration fields
 func validateConfig(cfg *Config) error {
-	// Skip SYNQ credentials validation in dry-run mode
-	if !cfg.DryRun {
-		if cfg.SYNQ.ClientID == "" {
-			return fmt.Errorf("SYNQ_CLIENT_ID is required (set via env var or --synq.client-id flag)")
-		}
-		if cfg.SYNQ.ClientSecret == "" {
-			return fmt.Errorf("SYNQ_CLIENT_SECRET is required (set via env var or --synq.client-secret flag)")
-		}
-		if cfg.SYNQ.Endpoint == "" {
-			return fmt.Errorf("synq.endpoint is required")
-		}
-	}
+	// Credentials are not validated here. There are four ways to hold one — the
+	// environment, the config file, a pre-issued token, a browser login in the
+	// shared credential store — and only the code that resolves them knows
+	// whether any produced a usable credential.
 	if cfg.GCP.ProjectID == "" {
 		return fmt.Errorf(
 			"GCP project ID is required. Set via:\n" +

@@ -3,14 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	_ "embed"
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
+	"syscall"
 
 	entitiescustomv1grpc "buf.build/gen/go/getsynq/api/grpc/go/synq/entities/custom/v1/customv1grpc"
 	entitiescustomv1 "buf.build/gen/go/getsynq/api/protocolbuffers/go/synq/entities/custom/v1"
@@ -19,14 +21,10 @@ import (
 	"github.com/getsynq/synq-google-cloud-storage/config"
 	"github.com/joho/godotenv"
 	"github.com/pkg/errors"
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2/clientcredentials"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -45,17 +43,21 @@ var (
 // ============================================================================
 
 var rootCmd = &cobra.Command{
-	Use:   "synq-google-cloud-storage",
-	Short: "Sync Google Cloud Storage buckets to SYNQ",
-	Long: `A Google Cloud Storage integration that syncs buckets
-as custom entities in the SYNQ platform.
+	Use:   toolName,
+	Short: "Sync Google Cloud Storage buckets to Coalesce Quality",
+	Long: `A Google Cloud Storage integration that publishes buckets
+as custom entities in Coalesce Quality.
 
 The tool supports configuration through:
   - YAML config file (config.yaml by default)
-  - Environment variables (SYNQ_CLIENT_ID, etc.)
+  - Environment variables (QUALITY_CLIENT_ID, etc.)
   - Command-line flags (highest precedence)
 
-Configuration precedence: defaults → config file → environment variables → flags`,
+Configuration precedence: defaults → config file → environment variables → flags
+
+Authenticate with a browser login (` + toolName + ` auth login), client
+credentials in QUALITY_CLIENT_ID and QUALITY_CLIENT_SECRET, or a pre-issued
+QUALITY_TOKEN. A browser login is shared with the other Coalesce Quality tools.`,
 	Version: version,
 	RunE:    runSync,
 }
@@ -64,7 +66,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("synq-google-cloud-storage %s\n", version)
+		fmt.Printf("%s %s\n", toolName, version)
 		fmt.Printf("  commit: %s\n", commit)
 		fmt.Printf("  built:  %s\n", date)
 	},
@@ -78,7 +80,7 @@ func main() {
 	config.InitFlags()
 
 	// Add subcommands
-	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(versionCmd, authCmd)
 
 	// Execute the root command
 	if err := rootCmd.Execute(); err != nil {
@@ -94,13 +96,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
-	// Setup context with cancellation and signal handling
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Cancel on interrupt and on SIGTERM, which is how a container runtime or a
+	// Kubernetes CronJob asks a sync to stop. The scan loops report the
+	// cancellation themselves through checkCancellation.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Setup logging and handle graceful shutdown
 	setupLogging(ctx)
-	handleShutdown(ctx, cancel)
 
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Starting Google Cloud Storage integration")
@@ -115,9 +117,23 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if len(cfg.DeprecatedKeys) > 0 {
+		logger.WarnContext(ctx, "Configuration uses superseded keys; the quality section replaces them",
+			slog.Any("keys", cfg.DeprecatedKeys),
+		)
+	}
+
 	// Show dry-run mode warning
 	if cfg.DryRun {
-		logger.InfoContext(ctx, "DRY-RUN MODE: Will scan GCP resources but not call SYNQ API")
+		logger.InfoContext(ctx, "DRY-RUN MODE: Will scan GCP resources but not call the Coalesce Quality API")
+	}
+
+	// Build filters from configuration. This is a pure read of the config, so it
+	// runs before anything is dialled: a bad pattern should not cost a login.
+	filters, err := buildFilters(cfg)
+	if err != nil {
+		logger.ErrorContext(ctx, "Invalid filter configuration", slog.String("error", err.Error()))
+		return err
 	}
 
 	// Setup clients
@@ -128,24 +144,21 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	var synqClients *synqClients
+	var qualityClients *qualityClients
 	if !cfg.DryRun {
-		synqClients = mustCreateSYNQClients(ctx, cfg)
+		qualityClients = mustCreateQualityClients(ctx, cfg)
 		defer func() {
-			if err := synqClients.close(); err != nil {
-				logger.ErrorContext(ctx, "Error closing SYNQ clients", slog.String("error", err.Error()))
+			if err := qualityClients.close(); err != nil {
+				logger.ErrorContext(ctx, "Error closing Coalesce Quality clients", slog.String("error", err.Error()))
 			}
 		}()
 
-		// Setup entity types in SYNQ
-		mustSetupEntityTypes(ctx, cfg, synqClients.types)
+		// Setup entity types in Coalesce Quality
+		mustSetupEntityTypes(ctx, cfg, qualityClients.types)
 	}
 
-	// Build filters from configuration
-	filters := buildFilters(cfg)
-
-	// Sync GCS resources to SYNQ
-	stats := syncResources(ctx, cfg, storageClient, synqClients, filters)
+	// Sync GCS resources to Coalesce Quality
+	stats := syncResources(ctx, cfg, storageClient, qualityClients, filters)
 
 	logger.InfoContext(ctx, "Sync completed successfully",
 		slog.Int("buckets", stats.Buckets),
@@ -159,8 +172,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 // Types
 // ============================================================================
 
-// synqClients holds all SYNQ API clients
-type synqClients struct {
+// qualityClients holds every Coalesce Quality API client a sync uses
+type qualityClients struct {
 	conn          *grpc.ClientConn
 	types         entitiescustomv1grpc.TypesServiceClient
 	entities      entitiescustomv1grpc.EntitiesServiceClient
@@ -168,7 +181,7 @@ type synqClients struct {
 	groups        entitiescustomv1grpc.GroupsServiceClient
 }
 
-func (c *synqClients) close() error {
+func (c *qualityClients) close() error {
 	if c.conn != nil {
 		return c.conn.Close()
 	}
@@ -191,39 +204,46 @@ type syncStats struct {
 // Configuration and Setup
 // ============================================================================
 
-// handleShutdown sets up graceful shutdown on interrupt signal
-func handleShutdown(ctx context.Context, cancel context.CancelFunc) {
-	logger := slog.Default()
-	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt)
-		<-sigChan
-		logger.InfoContext(ctx, "Received interrupt signal, shutting down...")
-		cancel()
-	}()
-}
-
 // buildFilters creates all filters from configuration
-func buildFilters(cfg *config.Config) *filters {
-	return &filters{
-		buckets:       buildIncludeExcludeFilter(cfg.Filter.Buckets),
-		relationships: buildIncludeExcludeFilter(cfg.Relationships.Filter),
+func buildFilters(cfg *config.Config) (*filters, error) {
+	buckets, err := buildIncludeExcludeFilter("filter.buckets", cfg.Filter.Buckets)
+	if err != nil {
+		return nil, err
 	}
+	relationships, err := buildIncludeExcludeFilter("relationships.filter", cfg.Relationships.Filter)
+	if err != nil {
+		return nil, err
+	}
+	return &filters{buckets: buckets, relationships: relationships}, nil
 }
 
-// buildIncludeExcludeFilter creates a filter from include/exclude patterns
-func buildIncludeExcludeFilter(rules config.FilterRules) Filter {
-	var includeFilters []Filter
-	for _, pattern := range rules.Include {
-		includeFilters = append(includeFilters, lo.Must(NewRegexFilter(pattern)))
+// buildIncludeExcludeFilter creates a filter from include/exclude patterns.
+//
+// The patterns are the user's, so a bad one is a configuration error naming the
+// key and the pattern, not a panic out of the middle of a sync.
+func buildIncludeExcludeFilter(section string, rules config.FilterRules) (Filter, error) {
+	compile := func(list []string, key string) ([]Filter, error) {
+		var compiled []Filter
+		for _, pattern := range list {
+			filter, err := NewRegexFilter(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("%s.%s: invalid pattern %q: %w", section, key, pattern, err)
+			}
+			compiled = append(compiled, filter)
+		}
+		return compiled, nil
 	}
 
-	var excludeFilters []Filter
-	for _, pattern := range rules.Exclude {
-		excludeFilters = append(excludeFilters, lo.Must(NewRegexFilter(pattern)))
+	includeFilters, err := compile(rules.Include, "include")
+	if err != nil {
+		return nil, err
+	}
+	excludeFilters, err := compile(rules.Exclude, "exclude")
+	if err != nil {
+		return nil, err
 	}
 
-	return NewIncludeExcludeFilter(includeFilters, excludeFilters)
+	return NewIncludeExcludeFilter(includeFilters, excludeFilters), nil
 }
 
 // ============================================================================
@@ -245,38 +265,26 @@ func mustCreateStorageClient(ctx context.Context, cfg *config.Config) *storage.C
 	return client
 }
 
-// mustCreateSYNQClients creates all SYNQ API clients or exits on error
-func mustCreateSYNQClients(ctx context.Context, cfg *config.Config) *synqClients {
+// mustCreateQualityClients resolves credentials and opens the API clients, or exits
+func mustCreateQualityClients(ctx context.Context, cfg *config.Config) *qualityClients {
 	logger := slog.Default()
-	logger.InfoContext(ctx, "Authenticating with SYNQ API", slog.String("endpoint", cfg.SYNQ.Endpoint))
 
-	host := strings.Split(cfg.SYNQ.Endpoint, ":")[0]
-
-	// Setup OAuth2
-	oauthConfig := &clientcredentials.Config{
-		ClientID:     cfg.SYNQ.ClientID,
-		ClientSecret: cfg.SYNQ.ClientSecret,
-		TokenURL:     cfg.SYNQ.OAuthURL,
-	}
-	oauthTokenSource := oauth.TokenSource{TokenSource: oauthConfig.TokenSource(ctx)}
-
-	// Setup gRPC connection
-	creds := credentials.NewTLS(&tls.Config{InsecureSkipVerify: false})
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(creds),
-		grpc.WithPerRPCCredentials(oauthTokenSource),
-		grpc.WithAuthority(host),
-	}
-
-	conn, err := grpc.NewClient(cfg.SYNQ.Endpoint, opts...)
+	target, err := resolveTarget(cfg)
 	if err != nil {
-		logger.ErrorContext(ctx, "Failed to connect to SYNQ API", slog.String("error", err.Error()))
+		logger.ErrorContext(ctx, "Could not resolve the Coalesce Quality deployment", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	logger.InfoContext(ctx, "Authenticating with the Coalesce Quality API", slog.String("deployment", target.String()))
+
+	conn, err := connect(ctx, cfg, target)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to connect to the Coalesce Quality API", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
-	logger.InfoContext(ctx, "Successfully connected to SYNQ API")
+	logger.InfoContext(ctx, "Successfully connected to the Coalesce Quality API")
 
-	return &synqClients{
+	return &qualityClients{
 		conn:          conn,
 		types:         entitiescustomv1grpc.NewTypesServiceClient(conn),
 		entities:      entitiescustomv1grpc.NewEntitiesServiceClient(conn),
@@ -289,7 +297,7 @@ func mustCreateSYNQClients(ctx context.Context, cfg *config.Config) *synqClients
 // Entity Type Management
 // ============================================================================
 
-// mustSetupEntityTypes creates or updates entity types in SYNQ
+// mustSetupEntityTypes creates or updates the custom entity types
 func mustSetupEntityTypes(ctx context.Context, cfg *config.Config, typesClient entitiescustomv1grpc.TypesServiceClient) {
 	logger := slog.Default()
 
@@ -302,7 +310,7 @@ func mustSetupEntityTypes(ctx context.Context, cfg *config.Config, typesClient e
 	)
 
 	// Create/update entity type
-	logger.InfoContext(ctx, "Creating/updating entity type in SYNQ",
+	logger.InfoContext(ctx, "Creating/updating entity type in Coalesce Quality",
 		slog.Int("bucket_type_id", int(cfg.Types.BucketTypeID)),
 	)
 
@@ -399,8 +407,8 @@ func validateSVG(data []byte) error {
 // Resource Sync
 // ============================================================================
 
-// syncResources syncs all GCS resources to SYNQ
-func syncResources(ctx context.Context, cfg *config.Config, storageClient *storage.Client, clients *synqClients, filters *filters) syncStats {
+// syncResources publishes every GCS resource
+func syncResources(ctx context.Context, cfg *config.Config, storageClient *storage.Client, clients *qualityClients, filters *filters) syncStats {
 	var entitiesClient entitiescustomv1grpc.EntitiesServiceClient
 	if clients != nil {
 		entitiesClient = clients.entities
@@ -418,7 +426,7 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 	}
 
 	// Sync buckets
-	createdEntities, bucketCount, relationshipsToCreate := syncBuckets(
+	createdEntities, bucketCount, desired := syncBuckets(
 		ctx,
 		cfg,
 		storageClient,
@@ -431,7 +439,7 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 	// Manage relationships and entity groups only if not in dry-run mode
 	if clients != nil {
 		if cfg.Relationships.Enabled {
-			manageRelationships(ctx, clients.relationships, createdEntities, relationshipsToCreate)
+			manageRelationships(ctx, clients.relationships, createdEntities, desired)
 		}
 		updateEntityGroup(ctx, cfg, clients.groups, createdEntities)
 	}
@@ -442,7 +450,7 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 	}
 }
 
-// syncBuckets syncs all buckets from GCS to SYNQ
+// syncBuckets publishes every bucket
 func syncBuckets(
 	ctx context.Context,
 	cfg *config.Config,
@@ -451,19 +459,19 @@ func syncBuckets(
 	bucketFilter Filter,
 	relationshipFilter Filter,
 	customEntities map[string]bool,
-) ([]*entitiesv1.Identifier, int, []*entitiescustomv1.Relationship) {
+) ([]*entitiesv1.Identifier, int, desiredRelationships) {
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Scanning GCS buckets")
 
 	var createdEntities []*entitiesv1.Identifier
-	var relationshipsToCreate []*entitiescustomv1.Relationship
+	desired := desiredRelationships{scope: newRelationshipScope()}
 	bucketCount := 0
 
 	bucketsIterator := storageClient.Buckets(ctx, cfg.GCP.ProjectID)
 	for {
 		// Check for cancellation
 		if err := checkCancellation(ctx); err != nil {
-			return createdEntities, bucketCount, relationshipsToCreate
+			return createdEntities, bucketCount, desired
 		}
 
 		bucketAttrs, err := bucketsIterator.Next()
@@ -516,6 +524,9 @@ func syncBuckets(
 					slog.String("bucket", bucketAttrs.Name),
 					slog.Int("count", len(notifications)),
 				)
+				// The list was read in full, so a topic missing from it is one the
+				// bucket no longer notifies rather than one this run never saw.
+				desired.scope.scanned(bucketID.GetCustom().GetId())
 				for _, notification := range notifications {
 					// notification.TopicID contains just the topic name
 					topicID := notification.TopicID
@@ -525,10 +536,13 @@ func syncBuckets(
 					)
 
 					relationshipKey := fmt.Sprintf("%s->%s", bucketAttrs.Name, topicID)
+					pubsubTopicCustomID := fmt.Sprintf("pubsub::%s", topicID)
+
+					// Recorded before the reasons not to publish it, because none of
+					// them mean the notification is gone.
+					desired.scope.observed(bucketID.GetCustom().GetId(), pubsubTopicCustomID)
 
 					if relationshipFilter.Accept(relationshipKey) {
-						pubsubTopicCustomID := fmt.Sprintf("pubsub::%s", topicID)
-
 						// Check if Pub/Sub topic entity exists (Pub/Sub topics are custom entities)
 						if customEntities == nil || customEntities[pubsubTopicCustomID] {
 							pubsubTopicID := &entitiesv1.Identifier{
@@ -539,7 +553,7 @@ func syncBuckets(
 								},
 							}
 
-							relationshipsToCreate = append(relationshipsToCreate, &entitiescustomv1.Relationship{
+							desired.edges = append(desired.edges, &entitiescustomv1.Relationship{
 								Upstream:   bucketID,
 								Downstream: pubsubTopicID,
 							})
@@ -561,7 +575,7 @@ func syncBuckets(
 	}
 
 	logger.InfoContext(ctx, "Buckets processed", slog.Int("count", bucketCount))
-	return createdEntities, bucketCount, relationshipsToCreate
+	return createdEntities, bucketCount, desired
 }
 
 // ============================================================================
@@ -573,7 +587,7 @@ func manageRelationships(
 	ctx context.Context,
 	client entitiescustomv1grpc.RelationshipsServiceClient,
 	createdEntities []*entitiesv1.Identifier,
-	relationshipsToCreate []*entitiescustomv1.Relationship,
+	desired desiredRelationships,
 ) {
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Retrieving existing relationships")
@@ -587,7 +601,7 @@ func manageRelationships(
 	}
 
 	// Deduplicate relationships
-	toCreate, toDelete := deduplicateRelationships(relationshipsToCreate, listResp.Relationships)
+	toCreate, toDelete := deduplicateRelationships(desired, listResp.Relationships)
 
 	logger.InfoContext(ctx, "Managing relationships",
 		slog.Int("to_create", len(toCreate)),
@@ -620,7 +634,7 @@ func manageRelationships(
 // deduplicateRelationships compares desired relationships with existing ones
 // Returns relationships to create and relationships to delete
 func deduplicateRelationships(
-	desired []*entitiescustomv1.Relationship,
+	desired desiredRelationships,
 	existing []*entitiescustomv1.Relationship,
 ) ([]*entitiescustomv1.Relationship, []*entitiescustomv1.Relationship) {
 	// Build a map of existing relationships for quick lookup
@@ -631,27 +645,115 @@ func deduplicateRelationships(
 
 	// Build a map of desired relationships
 	desiredMap := make(map[string]*entitiescustomv1.Relationship)
-	for _, rel := range desired {
+	for _, rel := range desired.edges {
 		desiredMap[rel.String()] = rel
 	}
 
-	// Find relationships to create (in desired but not in existing)
+	// Find relationships to create (in desired but not in existing), in the order
+	// the buckets were scanned rather than the map's.
 	var toCreate []*entitiescustomv1.Relationship
-	for key, rel := range desiredMap {
-		if _, exists := existingMap[key]; !exists {
-			toCreate = append(toCreate, rel)
+	seen := make(map[string]struct{}, len(desired.edges))
+	for _, rel := range desired.edges {
+		key := rel.String()
+		if _, exists := existingMap[key]; exists {
+			continue
 		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		toCreate = append(toCreate, rel)
+	}
+
+	// A run that established nothing withdraws nothing: relationships being on is
+	// not evidence, and a listing that failed leaves the same empty edge set as a
+	// workspace with no notifications at all. The question is what this run read,
+	// not how much it computed — asking the edge count instead made a run where
+	// every bucket answered and none has a notification any more leak its stale
+	// edges forever.
+	if len(desired.scope.scannedBuckets) == 0 {
+		return toCreate, nil
 	}
 
 	// Find relationships to delete (in existing but not in desired)
 	var toDelete []*entitiescustomv1.Relationship
 	for _, rel := range existing {
+		if !ownsRelationship(rel) {
+			continue
+		}
+		if !desired.scope.withdraws(rel) {
+			continue
+		}
 		if _, desired := desiredMap[rel.String()]; !desired {
 			toDelete = append(toDelete, rel)
 		}
 	}
 
 	return toCreate, toDelete
+}
+
+// desiredRelationships is what a run computed, carried together with the scope
+// it computed it in. The edges alone cannot say why an edge is absent, and
+// "absent" is the only evidence a withdrawal ever has.
+type desiredRelationships struct {
+	edges []*entitiescustomv1.Relationship
+	scope relationshipScope
+}
+
+// relationshipScope records what a run established first-hand: the buckets whose
+// notification list it read, and every notification it found there.
+//
+// The two are separate because a notification the run saw is not always one it
+// publishes — the relationship filter may exclude it, or the Pub/Sub topic may
+// not be an entity yet because that integration has not run. Neither is evidence
+// the notification is gone.
+type relationshipScope struct {
+	scannedBuckets map[string]bool
+	observedEdges  map[string]bool
+}
+
+func newRelationshipScope() relationshipScope {
+	return relationshipScope{
+		scannedBuckets: map[string]bool{},
+		observedEdges:  map[string]bool{},
+	}
+}
+
+// scanned records that this bucket's notification list was read in full, which
+// is what makes an edge missing from it stale rather than merely unknown.
+func (s relationshipScope) scanned(bucketID string) {
+	s.scannedBuckets[bucketID] = true
+}
+
+// observed records a notification found on the bucket, published or not.
+func (s relationshipScope) observed(bucketID, topicID string) {
+	s.observedEdges[edgeKey(bucketID, topicID)] = true
+}
+
+// withdraws reports whether this run has the standing to delete rel: the bucket
+// answered, and its notification list no longer names the topic.
+func (s relationshipScope) withdraws(rel *entitiescustomv1.Relationship) bool {
+	bucketID := rel.Upstream.GetCustom().GetId()
+	if !s.scannedBuckets[bucketID] {
+		return false
+	}
+	return !s.observedEdges[edgeKey(bucketID, rel.Downstream.GetCustom().GetId())]
+}
+
+func edgeKey(bucketID, topicID string) string {
+	return bucketID + "->" + topicID
+}
+
+// ownsRelationship reports whether this integration is the producer of rel: an
+// edge from a bucket to a Pub/Sub topic, which is the only shape it publishes.
+//
+// The stored edges are listed by bucket, so the answer also carries everything
+// else touching that bucket — a service catalog's link to the service that reads
+// it, a warehouse table loaded from it. Withdrawing those makes every run undo
+// another producer's work.
+func ownsRelationship(rel *entitiescustomv1.Relationship) bool {
+	return strings.HasPrefix(rel.Upstream.GetCustom().GetId(), "gcs::") &&
+		strings.HasPrefix(rel.Downstream.GetCustom().GetId(), "pubsub::")
 }
 
 // ============================================================================
@@ -670,7 +772,7 @@ func mustUpsertEntity(
 ) {
 	logger := slog.Default()
 
-	// Skip SYNQ API call in dry-run mode
+	// Skip the API call in dry-run mode
 	if client == nil {
 		logger.DebugContext(ctx, "[DRY-RUN] Would upsert entity",
 			slog.String("name", name),
@@ -702,12 +804,12 @@ func buildBucketDescription(attrs *storage.BucketAttrs) string {
 	var desc strings.Builder
 
 	// Storage class and location
-	desc.WriteString(fmt.Sprintf("**Storage Class:** %s\n\n", attrs.StorageClass))
-	desc.WriteString(fmt.Sprintf("**Location:** %s\n\n", attrs.Location))
+	_, _ = fmt.Fprintf(&desc, "**Storage Class:** %s\n\n", attrs.StorageClass)
+	_, _ = fmt.Fprintf(&desc, "**Location:** %s\n\n", attrs.Location)
 
 	// Creation date
 	if !attrs.Created.IsZero() {
-		desc.WriteString(fmt.Sprintf("**Created:** %s\n\n", attrs.Created.Format("2006-01-02 15:04:05 UTC")))
+		_, _ = fmt.Fprintf(&desc, "**Created:** %s\n\n", attrs.Created.Format("2006-01-02 15:04:05 UTC"))
 	}
 
 	// Versioning
@@ -717,12 +819,12 @@ func buildBucketDescription(attrs *storage.BucketAttrs) string {
 
 	// Lifecycle rules details
 	if len(attrs.Lifecycle.Rules) > 0 {
-		desc.WriteString(fmt.Sprintf("**Lifecycle Rules:** %d configured\n\n", len(attrs.Lifecycle.Rules)))
+		_, _ = fmt.Fprintf(&desc, "**Lifecycle Rules:** %d configured\n\n", len(attrs.Lifecycle.Rules))
 		for i, rule := range attrs.Lifecycle.Rules {
-			desc.WriteString(fmt.Sprintf("**Rule %d:**\n", i+1))
-			desc.WriteString(fmt.Sprintf("- Action: %s", rule.Action.Type))
+			_, _ = fmt.Fprintf(&desc, "**Rule %d:**\n", i+1)
+			_, _ = fmt.Fprintf(&desc, "- Action: %s", rule.Action.Type)
 			if rule.Action.StorageClass != "" {
-				desc.WriteString(fmt.Sprintf(" (to %s)", rule.Action.StorageClass))
+				_, _ = fmt.Fprintf(&desc, " (to %s)", rule.Action.StorageClass)
 			}
 			desc.WriteString("\n")
 
@@ -731,7 +833,7 @@ func buildBucketDescription(attrs *storage.BucketAttrs) string {
 			if len(conditions) > 0 {
 				desc.WriteString("- Conditions:\n")
 				for _, cond := range conditions {
-					desc.WriteString(fmt.Sprintf("  - %s\n", cond))
+					_, _ = fmt.Fprintf(&desc, "  - %s\n", cond)
 				}
 			}
 			desc.WriteString("\n")
@@ -762,9 +864,10 @@ func formatLifecycleConditions(cond storage.LifecycleCondition) []string {
 	}
 	if cond.Liveness != 0 {
 		livenessStr := "Unknown"
-		if cond.Liveness == storage.Live {
+		switch cond.Liveness {
+		case storage.Live:
 			livenessStr = "Live"
-		} else if cond.Liveness == storage.Archived {
+		case storage.Archived:
 			livenessStr = "Archived"
 		}
 		conditions = append(conditions, fmt.Sprintf("Liveness: %s", livenessStr))
@@ -815,11 +918,13 @@ func buildBucketAnnotations(attrs *storage.BucketAttrs) []*entitiesv1.Annotation
 		})
 	}
 
-	// Add user-defined labels from the bucket
-	for key, value := range attrs.Labels {
+	// Add user-defined labels from the bucket, in a fixed order: ranging over the
+	// map emits them differently every run, so every bucket looks changed on every
+	// upsert.
+	for _, key := range slices.Sorted(maps.Keys(attrs.Labels)) {
 		annotations = append(annotations, &entitiesv1.Annotation{
 			Name:   fmt.Sprintf("gcs.label.%s", key),
-			Values: []string{value},
+			Values: []string{attrs.Labels[key]},
 		})
 	}
 
