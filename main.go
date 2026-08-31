@@ -18,7 +18,6 @@ import (
 	"github.com/getsynq/synq-google-cloud-storage/config"
 	"github.com/joho/godotenv"
 	"github.com/pkg/errors"
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -126,6 +125,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 		logger.InfoContext(ctx, "DRY-RUN MODE: Will scan GCP resources but not call the Coalesce Quality API")
 	}
 
+	// Build filters from configuration. This is a pure read of the config, so it
+	// runs before anything is dialled: a bad pattern should not cost a login.
+	filters, err := buildFilters(cfg)
+	if err != nil {
+		logger.ErrorContext(ctx, "Invalid filter configuration", slog.String("error", err.Error()))
+		return err
+	}
+
 	// Setup clients
 	storageClient := mustCreateStorageClient(ctx, cfg)
 	defer func() {
@@ -146,9 +153,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 		// Setup entity types in Coalesce Quality
 		mustSetupEntityTypes(ctx, cfg, qualityClients.types)
 	}
-
-	// Build filters from configuration
-	filters := buildFilters(cfg)
 
 	// Sync GCS resources to Coalesce Quality
 	stats := syncResources(ctx, cfg, storageClient, qualityClients, filters)
@@ -210,26 +214,45 @@ func handleShutdown(ctx context.Context, cancel context.CancelFunc) {
 }
 
 // buildFilters creates all filters from configuration
-func buildFilters(cfg *config.Config) *filters {
-	return &filters{
-		buckets:       buildIncludeExcludeFilter(cfg.Filter.Buckets),
-		relationships: buildIncludeExcludeFilter(cfg.Relationships.Filter),
+func buildFilters(cfg *config.Config) (*filters, error) {
+	buckets, err := buildIncludeExcludeFilter("filter.buckets", cfg.Filter.Buckets)
+	if err != nil {
+		return nil, err
 	}
+	relationships, err := buildIncludeExcludeFilter("relationships.filter", cfg.Relationships.Filter)
+	if err != nil {
+		return nil, err
+	}
+	return &filters{buckets: buckets, relationships: relationships}, nil
 }
 
-// buildIncludeExcludeFilter creates a filter from include/exclude patterns
-func buildIncludeExcludeFilter(rules config.FilterRules) Filter {
-	var includeFilters []Filter
-	for _, pattern := range rules.Include {
-		includeFilters = append(includeFilters, lo.Must(NewRegexFilter(pattern)))
+// buildIncludeExcludeFilter creates a filter from include/exclude patterns.
+//
+// The patterns are the user's, so a bad one is a configuration error naming the
+// key and the pattern, not a panic out of the middle of a sync.
+func buildIncludeExcludeFilter(section string, rules config.FilterRules) (Filter, error) {
+	compile := func(list []string, key string) ([]Filter, error) {
+		var compiled []Filter
+		for _, pattern := range list {
+			filter, err := NewRegexFilter(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("%s.%s: invalid pattern %q: %w", section, key, pattern, err)
+			}
+			compiled = append(compiled, filter)
+		}
+		return compiled, nil
 	}
 
-	var excludeFilters []Filter
-	for _, pattern := range rules.Exclude {
-		excludeFilters = append(excludeFilters, lo.Must(NewRegexFilter(pattern)))
+	includeFilters, err := compile(rules.Include, "include")
+	if err != nil {
+		return nil, err
+	}
+	excludeFilters, err := compile(rules.Exclude, "exclude")
+	if err != nil {
+		return nil, err
 	}
 
-	return NewIncludeExcludeFilter(includeFilters, excludeFilters)
+	return NewIncludeExcludeFilter(includeFilters, excludeFilters), nil
 }
 
 // ============================================================================
