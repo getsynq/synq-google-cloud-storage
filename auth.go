@@ -60,7 +60,9 @@ func authApp() qualityoauth.App {
 // resolveTarget picks the deployment to talk to. The precedence lives in the
 // library, so this tool answers --region the same way every other Coalesce
 // Quality CLI does; the config file is offered as the configured endpoint, which
-// deliberately loses to a flag and to the environment.
+// loses to a flag and wins over the environment. Explicit configuration above
+// the ambient environment is the library's ordering, not this tool's, and
+// `TestTheConfigFileOutranksTheEnvironment` pins it.
 func resolveTarget(cfg *config.Config) (qualityoauth.Target, error) {
 	configured := cfg.Quality.Endpoint
 	if configured == "" && cfg.Quality.Region != "" {
