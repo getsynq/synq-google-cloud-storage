@@ -72,10 +72,11 @@ func TestAnotherProducersEdgeSurvives(t *testing.T) {
 	assert.Empty(t, edgeKeys(toDelete), "only a bucket-to-topic edge is this tool's to withdraw")
 }
 
-// TestNothingIsDeletedWhenTheRunComputedNothing covers a run with relationships
-// on where no bucket has a notification configured: the desired set is empty, and
-// an empty desired set must not mean "everything stored is unwanted".
-func TestNothingIsDeletedWhenTheRunComputedNothing(t *testing.T) {
+// TestNothingIsDeletedWhenTheRunEstablishedNothing is the incident rule: a run
+// that read no bucket's notification list knows nothing, so it withdraws nothing.
+// Relationships being on is not evidence; a listing that failed leaves the same
+// empty edge set as a workspace with no notifications at all.
+func TestNothingIsDeletedWhenTheRunEstablishedNothing(t *testing.T) {
 	existing := []*entitiescustomv1.Relationship{
 		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
 	}
@@ -83,6 +84,21 @@ func TestNothingIsDeletedWhenTheRunComputedNothing(t *testing.T) {
 	_, toDelete := deduplicateRelationships(computed(), existing)
 
 	assert.Empty(t, edgeKeys(toDelete))
+}
+
+// TestTheLastNotificationOfABucketLosesItsEdge is the other half of that pair,
+// and the case the old edge-count sentinel leaked forever: this run computed no
+// edges either, but it read the bucket and the bucket named nothing, so the edge
+// is stale rather than unknown.
+func TestTheLastNotificationOfABucketLosesItsEdge(t *testing.T) {
+	desired := computed().andRead("gcs::artefacts")
+	existing := []*entitiescustomv1.Relationship{
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+	}
+
+	_, toDelete := deduplicateRelationships(desired, existing)
+
+	assert.Equal(t, []string{"gcs::artefacts->pubsub::prod.gcs.artefacts"}, edgeKeys(toDelete))
 }
 
 // TestAStaleNotificationEdgeIsDeleted keeps the reconciliation this tool is for:
