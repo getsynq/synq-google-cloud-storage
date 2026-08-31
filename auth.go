@@ -231,7 +231,7 @@ var authCmd = &cobra.Command{
 	Long: `Manage authentication for the Coalesce Quality API.
 
 Credentials are cached under ~/.synq/oauth/, partitioned by deployment, and
-shared with the other Coalesce Quality tools — so a login done by synqctl or
+shared with the other Coalesce Quality tools — so a login done by synqcli or
 synq-recon already serves this integration, and the other way round.
 
 Publishing entities needs SCOPE_ENTITY_EDIT, SCOPE_ENTITY_TYPE_EDIT and
