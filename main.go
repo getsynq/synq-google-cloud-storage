@@ -7,8 +7,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -94,13 +96,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
-	// Setup context with cancellation and signal handling
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Cancel on interrupt and on SIGTERM, which is how a container runtime or a
+	// Kubernetes CronJob asks a sync to stop. The scan loops report the
+	// cancellation themselves through checkCancellation.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Setup logging and handle graceful shutdown
 	setupLogging(ctx)
-	defer handleShutdown(ctx, cancel)()
 
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Starting Google Cloud Storage integration")
@@ -201,29 +203,6 @@ type syncStats struct {
 // ============================================================================
 // Configuration and Setup
 // ============================================================================
-
-// handleShutdown cancels ctx on a shutdown signal, and returns a stop that
-// unregisters the handler.
-//
-// SIGTERM is here because that is how a container runtime or a Kubernetes
-// CronJob asks a sync to stop; registering only os.Interrupt left every
-// scheduled run to be killed outright rather than cancelled. Calling stop
-// matters for the same reason the goroutine watches ctx.Done(): neither should
-// outlive an ordinary run.
-func handleShutdown(ctx context.Context, cancel context.CancelFunc) (stop func()) {
-	logger := slog.Default()
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		select {
-		case sig := <-sigChan:
-			logger.InfoContext(ctx, "Received shutdown signal, shutting down...", slog.String("signal", sig.String()))
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return func() { signal.Stop(sigChan) }
-}
 
 // buildFilters creates all filters from configuration
 func buildFilters(cfg *config.Config) (*filters, error) {
@@ -670,12 +649,20 @@ func deduplicateRelationships(
 		desiredMap[rel.String()] = rel
 	}
 
-	// Find relationships to create (in desired but not in existing)
+	// Find relationships to create (in desired but not in existing), in the order
+	// the buckets were scanned rather than the map's.
 	var toCreate []*entitiescustomv1.Relationship
-	for key, rel := range desiredMap {
-		if _, exists := existingMap[key]; !exists {
-			toCreate = append(toCreate, rel)
+	seen := make(map[string]struct{}, len(desired.edges))
+	for _, rel := range desired.edges {
+		key := rel.String()
+		if _, exists := existingMap[key]; exists {
+			continue
 		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		toCreate = append(toCreate, rel)
 	}
 
 	// A run that computed nothing withdraws nothing. Relationships can be on while
@@ -928,11 +915,13 @@ func buildBucketAnnotations(attrs *storage.BucketAttrs) []*entitiesv1.Annotation
 		})
 	}
 
-	// Add user-defined labels from the bucket
-	for key, value := range attrs.Labels {
+	// Add user-defined labels from the bucket, in a fixed order: ranging over the
+	// map emits them differently every run, so every bucket looks changed on every
+	// upsert.
+	for _, key := range slices.Sorted(maps.Keys(attrs.Labels)) {
 		annotations = append(annotations, &entitiesv1.Annotation{
 			Name:   fmt.Sprintf("gcs.label.%s", key),
-			Values: []string{value},
+			Values: []string{attrs.Labels[key]},
 		})
 	}
 

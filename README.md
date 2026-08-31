@@ -362,8 +362,8 @@ In dry-run mode:
 # Run with custom project ID
 go run main.go --gcp.project-id=my-project
 
-# Run with US region endpoints
-go run main.go --synq.endpoint=api.us.synq.io:443 --synq.oauth-url=https://api.us.synq.io/oauth2/token
+# Run against the US deployment
+go run main.go --region=us
 
 # Run with custom filters
 go run main.go --filter.buckets.exclude="test-.*"
