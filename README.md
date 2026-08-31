@@ -196,6 +196,12 @@ The integration can automatically create lineage relationships when buckets have
 - **Pub/Sub integration**: [synq-google-cloud-pubsub](https://github.com/getsynq/synq-google-cloud-pubsub) should be set up first
 - Links to non-existent `pubsub::<topic_id>` entities are skipped with debug logging
 
+**Cycles:** each integration only withdraws the relationship shape it publishes,
+so the two never undo each other. With both relationship features enabled, a
+bucket that notifies a topic whose subscription writes back to that same bucket
+forms a three-hop cycle in the graph. That is a faithful picture of the delivery
+path rather than a fault, but it is worth knowing before you read it as one.
+
 **Configuration:**
 
 ```yaml
