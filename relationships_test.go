@@ -86,3 +86,44 @@ func TestOnlyBucketToTopicIsOwned(t *testing.T) {
 	assert.False(t, ownsRelationship(edge("service::producer", "gcs::artefacts")))
 	assert.False(t, ownsRelationship(edge("gcs::artefacts", "gcs::mirror")))
 }
+
+// TestABucketThisRunDidNotComputeKeepsItsEdges is the reproducer for the
+// per-bucket form of the withdrawal bug.
+//
+// The empty-desired guard only covers a run that computed nothing at all. One
+// bucket answering while another's notification lookup fails is the ordinary
+// case, and the bucket that did not answer contributes no desired edge — so its
+// stored edge is indistinguishable from a stale one and goes.
+func TestABucketThisRunDidNotComputeKeepsItsEdges(t *testing.T) {
+	desired := []*entitiescustomv1.Relationship{
+		edge("gcs::logs", "pubsub::prod.gcs.logs"),
+	}
+	existing := []*entitiescustomv1.Relationship{
+		edge("gcs::logs", "pubsub::prod.gcs.logs"),
+		// The bucket whose notification list this run never read.
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+	}
+
+	_, toDelete := deduplicateRelationships(desired, existing)
+
+	assert.Empty(t, edgeKeys(toDelete), "a bucket this run did not compute is not this run's to withdraw")
+}
+
+// TestAnEdgeTheRunSawButDidNotPublishSurvives covers the two reasons a bucket's
+// own notification does not become a desired edge: the relationship filter
+// excludes it, or the Pub/Sub topic is not an entity yet because that
+// integration has not run. Neither means the notification is gone.
+func TestAnEdgeTheRunSawButDidNotPublishSurvives(t *testing.T) {
+	desired := []*entitiescustomv1.Relationship{
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+	}
+	existing := []*entitiescustomv1.Relationship{
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+		// Configured on the bucket, seen by this run, deliberately not published.
+		edge("gcs::artefacts", "pubsub::prod.gcs.audit"),
+	}
+
+	_, toDelete := deduplicateRelationships(desired, existing)
+
+	assert.Empty(t, edgeKeys(toDelete), "an edge the run saw but chose not to publish is still configured")
+}
