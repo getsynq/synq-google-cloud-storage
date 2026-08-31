@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	qualityoauth "github.com/getsynq/quality-oauth-go"
@@ -145,4 +147,49 @@ func TestAnOAuthURLOverridesTheDeployment(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "https://auth.example.internal/oauth2/token", got)
+}
+
+// TestAnUnknownRegionInTheConfigFileDoesNotBlockAFlag is the reproducer for a
+// typo in the file disabling the flag that exists to override the file.
+//
+// resolveTarget returns the TargetForRegion error before Sources.Resolve ever
+// sees what the user typed, so `--region us` cannot rescue a config file with a
+// bad quality.region.
+func TestAnUnknownRegionInTheConfigFileDoesNotBlockAFlag(t *testing.T) {
+	clearDeploymentEnv(t)
+
+	target, err := resolveTarget(&config.Config{Quality: config.QualityConfig{
+		Region:     "atlantis",
+		RegionFlag: "us",
+	}})
+
+	require.NoError(t, err)
+	assert.Equal(t, "us", target.Region)
+}
+
+// TestAuthKeepsTheDeploymentWhenTheGCPProjectIsMissing is the reproducer for
+// `auth login --region us` logging into the wrong deployment.
+//
+// A sync needs a GCP project; logging in does not. LoadConfig returned nil
+// alongside the validation error, so targetFromCommand threw away the flags and
+// the file together and fell back to whatever the environment or the last login
+// said.
+func TestAuthKeepsTheDeploymentWhenTheGCPProjectIsMissing(t *testing.T) {
+	clearDeploymentEnv(t)
+	t.Setenv("GCP_PROJECT_ID", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("GCLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CONFIG", t.TempDir())
+	t.Setenv("PATH", "")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("quality:\n  region: us\n"), 0o600))
+
+	cfg, err := config.LoadConfig(path)
+	require.Error(t, err, "a sync still needs a GCP project")
+	require.NotNil(t, cfg, "the parsed file is what an auth subcommand needs")
+
+	target, err := resolveTarget(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, "us", target.Region)
 }
