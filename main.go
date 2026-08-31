@@ -412,7 +412,7 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 	}
 
 	// Sync buckets
-	createdEntities, bucketCount, relationshipsToCreate := syncBuckets(
+	createdEntities, bucketCount, desired := syncBuckets(
 		ctx,
 		cfg,
 		storageClient,
@@ -425,7 +425,7 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 	// Manage relationships and entity groups only if not in dry-run mode
 	if clients != nil {
 		if cfg.Relationships.Enabled {
-			manageRelationships(ctx, clients.relationships, createdEntities, relationshipsToCreate)
+			manageRelationships(ctx, clients.relationships, createdEntities, desired)
 		}
 		updateEntityGroup(ctx, cfg, clients.groups, createdEntities)
 	}
@@ -445,19 +445,19 @@ func syncBuckets(
 	bucketFilter Filter,
 	relationshipFilter Filter,
 	customEntities map[string]bool,
-) ([]*entitiesv1.Identifier, int, []*entitiescustomv1.Relationship) {
+) ([]*entitiesv1.Identifier, int, desiredRelationships) {
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Scanning GCS buckets")
 
 	var createdEntities []*entitiesv1.Identifier
-	var relationshipsToCreate []*entitiescustomv1.Relationship
+	desired := desiredRelationships{scope: newRelationshipScope()}
 	bucketCount := 0
 
 	bucketsIterator := storageClient.Buckets(ctx, cfg.GCP.ProjectID)
 	for {
 		// Check for cancellation
 		if err := checkCancellation(ctx); err != nil {
-			return createdEntities, bucketCount, relationshipsToCreate
+			return createdEntities, bucketCount, desired
 		}
 
 		bucketAttrs, err := bucketsIterator.Next()
@@ -510,6 +510,9 @@ func syncBuckets(
 					slog.String("bucket", bucketAttrs.Name),
 					slog.Int("count", len(notifications)),
 				)
+				// The list was read in full, so a topic missing from it is one the
+				// bucket no longer notifies rather than one this run never saw.
+				desired.scope.scanned(bucketID.GetCustom().GetId())
 				for _, notification := range notifications {
 					// notification.TopicID contains just the topic name
 					topicID := notification.TopicID
@@ -519,10 +522,13 @@ func syncBuckets(
 					)
 
 					relationshipKey := fmt.Sprintf("%s->%s", bucketAttrs.Name, topicID)
+					pubsubTopicCustomID := fmt.Sprintf("pubsub::%s", topicID)
+
+					// Recorded before the reasons not to publish it, because none of
+					// them mean the notification is gone.
+					desired.scope.observed(bucketID.GetCustom().GetId(), pubsubTopicCustomID)
 
 					if relationshipFilter.Accept(relationshipKey) {
-						pubsubTopicCustomID := fmt.Sprintf("pubsub::%s", topicID)
-
 						// Check if Pub/Sub topic entity exists (Pub/Sub topics are custom entities)
 						if customEntities == nil || customEntities[pubsubTopicCustomID] {
 							pubsubTopicID := &entitiesv1.Identifier{
@@ -533,7 +539,7 @@ func syncBuckets(
 								},
 							}
 
-							relationshipsToCreate = append(relationshipsToCreate, &entitiescustomv1.Relationship{
+							desired.edges = append(desired.edges, &entitiescustomv1.Relationship{
 								Upstream:   bucketID,
 								Downstream: pubsubTopicID,
 							})
@@ -555,7 +561,7 @@ func syncBuckets(
 	}
 
 	logger.InfoContext(ctx, "Buckets processed", slog.Int("count", bucketCount))
-	return createdEntities, bucketCount, relationshipsToCreate
+	return createdEntities, bucketCount, desired
 }
 
 // ============================================================================
@@ -567,7 +573,7 @@ func manageRelationships(
 	ctx context.Context,
 	client entitiescustomv1grpc.RelationshipsServiceClient,
 	createdEntities []*entitiesv1.Identifier,
-	relationshipsToCreate []*entitiescustomv1.Relationship,
+	desired desiredRelationships,
 ) {
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Retrieving existing relationships")
@@ -581,7 +587,7 @@ func manageRelationships(
 	}
 
 	// Deduplicate relationships
-	toCreate, toDelete := deduplicateRelationships(relationshipsToCreate, listResp.Relationships)
+	toCreate, toDelete := deduplicateRelationships(desired, listResp.Relationships)
 
 	logger.InfoContext(ctx, "Managing relationships",
 		slog.Int("to_create", len(toCreate)),
@@ -614,7 +620,7 @@ func manageRelationships(
 // deduplicateRelationships compares desired relationships with existing ones
 // Returns relationships to create and relationships to delete
 func deduplicateRelationships(
-	desired []*entitiescustomv1.Relationship,
+	desired desiredRelationships,
 	existing []*entitiescustomv1.Relationship,
 ) ([]*entitiescustomv1.Relationship, []*entitiescustomv1.Relationship) {
 	// Build a map of existing relationships for quick lookup
@@ -625,7 +631,7 @@ func deduplicateRelationships(
 
 	// Build a map of desired relationships
 	desiredMap := make(map[string]*entitiescustomv1.Relationship)
-	for _, rel := range desired {
+	for _, rel := range desired.edges {
 		desiredMap[rel.String()] = rel
 	}
 
@@ -640,7 +646,7 @@ func deduplicateRelationships(
 	// A run that computed nothing withdraws nothing. Relationships can be on while
 	// no bucket has a notification configured, and treating that as "everything
 	// stored is unwanted" is how a sync deletes lineage it never published.
-	if len(desired) == 0 {
+	if len(desired.edges) == 0 {
 		return toCreate, nil
 	}
 
@@ -650,12 +656,67 @@ func deduplicateRelationships(
 		if !ownsRelationship(rel) {
 			continue
 		}
+		if !desired.scope.withdraws(rel) {
+			continue
+		}
 		if _, desired := desiredMap[rel.String()]; !desired {
 			toDelete = append(toDelete, rel)
 		}
 	}
 
 	return toCreate, toDelete
+}
+
+// desiredRelationships is what a run computed, carried together with the scope
+// it computed it in. The edges alone cannot say why an edge is absent, and
+// "absent" is the only evidence a withdrawal ever has.
+type desiredRelationships struct {
+	edges []*entitiescustomv1.Relationship
+	scope relationshipScope
+}
+
+// relationshipScope records what a run established first-hand: the buckets whose
+// notification list it read, and every notification it found there.
+//
+// The two are separate because a notification the run saw is not always one it
+// publishes — the relationship filter may exclude it, or the Pub/Sub topic may
+// not be an entity yet because that integration has not run. Neither is evidence
+// the notification is gone.
+type relationshipScope struct {
+	scannedBuckets map[string]bool
+	observedEdges  map[string]bool
+}
+
+func newRelationshipScope() relationshipScope {
+	return relationshipScope{
+		scannedBuckets: map[string]bool{},
+		observedEdges:  map[string]bool{},
+	}
+}
+
+// scanned records that this bucket's notification list was read in full, which
+// is what makes an edge missing from it stale rather than merely unknown.
+func (s relationshipScope) scanned(bucketID string) {
+	s.scannedBuckets[bucketID] = true
+}
+
+// observed records a notification found on the bucket, published or not.
+func (s relationshipScope) observed(bucketID, topicID string) {
+	s.observedEdges[edgeKey(bucketID, topicID)] = true
+}
+
+// withdraws reports whether this run has the standing to delete rel: the bucket
+// answered, and its notification list no longer names the topic.
+func (s relationshipScope) withdraws(rel *entitiescustomv1.Relationship) bool {
+	bucketID := rel.Upstream.GetCustom().GetId()
+	if !s.scannedBuckets[bucketID] {
+		return false
+	}
+	return !s.observedEdges[edgeKey(bucketID, rel.Downstream.GetCustom().GetId())]
+}
+
+func edgeKey(bucketID, topicID string) string {
+	return bucketID + "->" + topicID
 }
 
 // ownsRelationship reports whether this integration is the producer of rel: an

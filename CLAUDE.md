@@ -105,17 +105,28 @@ everywhere.
 ### Relationship reconciliation — a run only withdraws what it computed
 
 The stored edges are listed by bucket, so the answer carries every edge touching
-it, including other producers'. Two rules, both breakable in silence:
+it, including other producers'. Three rules, all breakable in silence:
 
-- A run that computed no relationships withdraws none. Relationships can be on
-  while no bucket has a notification configured.
 - `ownsRelationship` is the shape test: `gcs::` upstream, `pubsub::` downstream.
   Anything else — a service linked to the bucket, a warehouse table loaded from
   it — belongs to another producer.
+- A run that computed no relationships withdraws none. Relationships can be on
+  while no bucket has a notification configured.
+- Within a run, `relationshipScope` decides per bucket. An edge is withdrawn only
+  when that bucket's notification list was read in full (`scanned`) and no longer
+  names the topic. A bucket whose `Notifications` call failed is never scanned,
+  and a notification the run saw is `observed` before the reasons not to publish
+  it — the relationship filter excluded it, or the Pub/Sub topic is not an entity
+  yet because that integration has not run. None of those mean the notification
+  is gone.
 
-`relationships_test.go` covers both; the first two tests in it are the reproducer.
-The sibling Pub/Sub integration shipped the same bug in a form that fired by
-default and deleted seven edges from a live workspace.
+Absence is the only evidence a withdrawal ever has, which is why `syncBuckets`
+carries the scope out alongside the edges in `desiredRelationships` rather than
+letting `deduplicateRelationships` infer intent from an empty set.
+
+`relationships_test.go` covers all three. The sibling Pub/Sub integration shipped
+the first form of this bug in a version that fired by default and deleted seven
+edges from a live workspace.
 
 ## Key Implementation Details
 

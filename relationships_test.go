@@ -26,6 +26,31 @@ func edgeKeys(rels []*entitiescustomv1.Relationship) []string {
 	return keys
 }
 
+// computed is what a run established: every edge given was found on its bucket's
+// notification list and published, which also records that bucket as read.
+func computed(published ...*entitiescustomv1.Relationship) desiredRelationships {
+	run := desiredRelationships{scope: newRelationshipScope()}
+	for _, rel := range published {
+		run.edges = append(run.edges, rel)
+		run = run.andSaw(rel)
+	}
+	return run
+}
+
+// andSaw adds a notification the run found on the bucket but did not publish.
+func (d desiredRelationships) andSaw(rel *entitiescustomv1.Relationship) desiredRelationships {
+	bucketID := rel.Upstream.GetCustom().GetId()
+	d.scope.scanned(bucketID)
+	d.scope.observed(bucketID, rel.Downstream.GetCustom().GetId())
+	return d
+}
+
+// andRead adds a bucket whose notification list was read and named nothing.
+func (d desiredRelationships) andRead(bucketID string) desiredRelationships {
+	d.scope.scanned(bucketID)
+	return d
+}
+
 // TestAnotherProducersEdgeSurvives is the reproducer for this sync withdrawing
 // lineage it never published.
 //
@@ -34,9 +59,7 @@ func edgeKeys(rels []*entitiescustomv1.Relationship) []string {
 // the service that reads it. The only shape this integration publishes is a
 // bucket to its notification topic, and anything else is another producer's.
 func TestAnotherProducersEdgeSurvives(t *testing.T) {
-	desired := []*entitiescustomv1.Relationship{
-		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
-	}
+	desired := computed(edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"))
 	existing := []*entitiescustomv1.Relationship{
 		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
 		edge("gcs::artefacts", "service::consumer"),
@@ -57,7 +80,7 @@ func TestNothingIsDeletedWhenTheRunComputedNothing(t *testing.T) {
 		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
 	}
 
-	_, toDelete := deduplicateRelationships(nil, existing)
+	_, toDelete := deduplicateRelationships(computed(), existing)
 
 	assert.Empty(t, edgeKeys(toDelete))
 }
@@ -66,9 +89,7 @@ func TestNothingIsDeletedWhenTheRunComputedNothing(t *testing.T) {
 // a notification removed from the bucket leaves an edge behind, and that edge is
 // this tool's own shape, so it goes.
 func TestAStaleNotificationEdgeIsDeleted(t *testing.T) {
-	desired := []*entitiescustomv1.Relationship{
-		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
-	}
+	desired := computed(edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"))
 	existing := []*entitiescustomv1.Relationship{
 		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
 		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts.retired"),
@@ -95,9 +116,7 @@ func TestOnlyBucketToTopicIsOwned(t *testing.T) {
 // case, and the bucket that did not answer contributes no desired edge — so its
 // stored edge is indistinguishable from a stale one and goes.
 func TestABucketThisRunDidNotComputeKeepsItsEdges(t *testing.T) {
-	desired := []*entitiescustomv1.Relationship{
-		edge("gcs::logs", "pubsub::prod.gcs.logs"),
-	}
+	desired := computed(edge("gcs::logs", "pubsub::prod.gcs.logs"))
 	existing := []*entitiescustomv1.Relationship{
 		edge("gcs::logs", "pubsub::prod.gcs.logs"),
 		// The bucket whose notification list this run never read.
@@ -114,9 +133,8 @@ func TestABucketThisRunDidNotComputeKeepsItsEdges(t *testing.T) {
 // excludes it, or the Pub/Sub topic is not an entity yet because that
 // integration has not run. Neither means the notification is gone.
 func TestAnEdgeTheRunSawButDidNotPublishSurvives(t *testing.T) {
-	desired := []*entitiescustomv1.Relationship{
-		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
-	}
+	desired := computed(edge("gcs::artefacts", "pubsub::prod.gcs.artefacts")).
+		andSaw(edge("gcs::artefacts", "pubsub::prod.gcs.audit"))
 	existing := []*entitiescustomv1.Relationship{
 		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
 		// Configured on the bucket, seen by this run, deliberately not published.
@@ -126,4 +144,20 @@ func TestAnEdgeTheRunSawButDidNotPublishSurvives(t *testing.T) {
 	_, toDelete := deduplicateRelationships(desired, existing)
 
 	assert.Empty(t, edgeKeys(toDelete), "an edge the run saw but chose not to publish is still configured")
+}
+
+// TestABucketReadWithNoNotificationsLeftWithdrawsItsEdge is the other side of the
+// scope rule, and the reason it is not simply "never withdraw for a bucket that
+// published nothing": the bucket answered and named no topic, so the edge left
+// behind is genuinely stale.
+func TestABucketReadWithNoNotificationsLeftWithdrawsItsEdge(t *testing.T) {
+	desired := computed(edge("gcs::logs", "pubsub::prod.gcs.logs")).andRead("gcs::artefacts")
+	existing := []*entitiescustomv1.Relationship{
+		edge("gcs::logs", "pubsub::prod.gcs.logs"),
+		edge("gcs::artefacts", "pubsub::prod.gcs.artefacts"),
+	}
+
+	_, toDelete := deduplicateRelationships(desired, existing)
+
+	assert.Equal(t, []string{"gcs::artefacts->pubsub::prod.gcs.artefacts"}, edgeKeys(toDelete))
 }
