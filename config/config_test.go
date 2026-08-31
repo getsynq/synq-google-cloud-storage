@@ -73,6 +73,46 @@ synq:
 	assert.Equal(t, []string{"synq.client_id"}, cfg.DeprecatedKeys)
 }
 
+// TestALegacyClientPairDoesNotOverrideAPromotedToken pins credentials as one
+// setting rather than three fields. `connect` prefers a client pair over a
+// token, so importing a stale legacy pair beside a promoted token does not just
+// add a fallback - it changes which principal the sync authenticates as.
+func TestALegacyClientPairDoesNotOverrideAPromotedToken(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, `
+gcp:
+  project_id: example-project
+quality:
+  token: promoted-token
+synq:
+  client_id: legacy-id
+  client_secret: legacy-secret
+`))
+	require.NoError(t, err)
+	assert.Equal(t, "promoted-token", cfg.Quality.Token)
+	assert.Empty(t, cfg.Quality.ClientID)
+	assert.Empty(t, cfg.Quality.ClientSecret)
+	assert.Empty(t, cfg.DeprecatedKeys)
+}
+
+// TestALegacyEndpointDoesNotOverrideAPromotedRegion pins the deployment as one
+// setting for the same reason: an endpoint outranks a region, so a legacy
+// endpoint merged in beside a promoted region moves the whole sync to another
+// deployment while the section that is supposed to lose is the one deciding.
+func TestALegacyEndpointDoesNotOverrideAPromotedRegion(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, `
+gcp:
+  project_id: example-project
+quality:
+  region: eu
+synq:
+  endpoint: developer.synq.io:443
+`))
+	require.NoError(t, err)
+	assert.Equal(t, "eu", cfg.Quality.Region)
+	assert.Empty(t, cfg.Quality.Endpoint)
+	assert.Empty(t, cfg.DeprecatedKeys)
+}
+
 // TestMergeLeavesPopulatedFieldsAlone is the unit behind those two.
 func TestMergeLeavesPopulatedFieldsAlone(t *testing.T) {
 	q := QualityConfig{Endpoint: "api.us.synq.io:443"}
