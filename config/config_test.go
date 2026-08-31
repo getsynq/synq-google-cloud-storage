@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -107,4 +108,49 @@ func TestProjectIDIsStillRequired(t *testing.T) {
 	_, err := LoadConfig(writeConfig(t, "quality:\n  region: eu\n"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GCP project ID is required")
+}
+
+// withFlags installs a fresh flag set holding what the user typed, so a test
+// exercises the flag tier the command actually uses.
+func withFlags(t *testing.T, args ...string) {
+	t.Helper()
+	saved := pflag.CommandLine
+	pflag.CommandLine = pflag.NewFlagSet("test", pflag.ContinueOnError)
+	t.Cleanup(func() { pflag.CommandLine = saved })
+	InitFlags()
+	require.NoError(t, pflag.CommandLine.Parse(args))
+}
+
+// TestCredentialFlagsArePassedThrough covers the promoted spelling.
+func TestCredentialFlagsArePassedThrough(t *testing.T) {
+	withFlags(t, "--client-id=flag-id", "--client-secret=flag-secret")
+
+	cfg, err := LoadConfig(writeConfig(t, "gcp:\n  project_id: example-project\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "flag-id", cfg.Quality.ClientID)
+	assert.Equal(t, "flag-secret", cfg.Quality.ClientSecret)
+}
+
+// TestDeprecatedCredentialFlagsArePassedThrough is the compatibility case. The
+// dashed sub-key cannot reach the `client_id` mapstructure field on its own, so
+// an unattended CI job passing the old spelling gets no credential at all and
+// falls through to a browser login that never completes.
+func TestDeprecatedCredentialFlagsArePassedThrough(t *testing.T) {
+	withFlags(t, "--synq.client-id=legacy-id", "--synq.client-secret=legacy-secret")
+
+	cfg, err := LoadConfig(writeConfig(t, "gcp:\n  project_id: example-project\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-id", cfg.Quality.ClientID)
+	assert.Equal(t, "legacy-secret", cfg.Quality.ClientSecret)
+}
+
+// TestPromotedCredentialFlagsWinOverDeprecated pins the precedence, so a stale
+// flag left in a CI script cannot override the one just added beside it.
+func TestPromotedCredentialFlagsWinOverDeprecated(t *testing.T) {
+	withFlags(t, "--client-id=flag-id", "--synq.client-id=legacy-id", "--synq.client-secret=legacy-secret")
+
+	cfg, err := LoadConfig(writeConfig(t, "gcp:\n  project_id: example-project\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "flag-id", cfg.Quality.ClientID)
+	assert.Equal(t, "legacy-secret", cfg.Quality.ClientSecret)
 }
