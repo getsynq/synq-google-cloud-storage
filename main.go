@@ -665,10 +665,13 @@ func deduplicateRelationships(
 		toCreate = append(toCreate, rel)
 	}
 
-	// A run that computed nothing withdraws nothing. Relationships can be on while
-	// no bucket has a notification configured, and treating that as "everything
-	// stored is unwanted" is how a sync deletes lineage it never published.
-	if len(desired.edges) == 0 {
+	// A run that established nothing withdraws nothing: relationships being on is
+	// not evidence, and a listing that failed leaves the same empty edge set as a
+	// workspace with no notifications at all. The question is what this run read,
+	// not how much it computed — asking the edge count instead made a run where
+	// every bucket answered and none has a notification any more leak its stale
+	// edges forever.
+	if len(desired.scope.scannedBuckets) == 0 {
 		return toCreate, nil
 	}
 

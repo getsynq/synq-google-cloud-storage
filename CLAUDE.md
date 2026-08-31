@@ -29,10 +29,13 @@ golines -w -m 150 .
 
 Understanding the sync flow when modifying code:
 
-1. `runSync()` (main.go:90) - Cobra command handler, sets up context and logging
-2. `syncResources()` (main.go:401) - Main orchestration
-3. `syncBuckets()` (main.go:422) - Iterates buckets, filters, creates entities
-4. `updateEntityGroup()` (main.go:508) - Updates group for automatic cleanup
+1. `runSync()` - Cobra command handler, sets up context and logging
+2. `syncResources()` - Main orchestration
+3. `syncBuckets()` - Iterates buckets, filters, creates entities
+4. `updateEntityGroup()` - Updates group for automatic cleanup
+
+Referred to by name, not by line: the numbers were stale within one PR of being
+written.
 
 **Important patterns:**
 - All `must*` functions exit with `os.Exit(1)` on fatal errors (don't return errors)
@@ -115,8 +118,11 @@ it, including other producers'. Three rules, all breakable in silence:
 - `ownsRelationship` is the shape test: `gcs::` upstream, `pubsub::` downstream.
   Anything else — a service linked to the bucket, a warehouse table loaded from
   it — belongs to another producer.
-- A run that computed no relationships withdraws none. Relationships can be on
-  while no bucket has a notification configured.
+- A run that established nothing withdraws nothing. The sentinel is
+  `len(scope.scannedBuckets)`, not the edge count: relationships being on is not
+  evidence, and a listing that failed leaves the same empty edge set as a
+  workspace with no notifications at all. Asking the edge count instead leaked
+  every stale edge forever once a workspace's last notification was removed.
 - Within a run, `relationshipScope` decides per bucket. An edge is withdrawn only
   when that bucket's notification list was read in full (`scanned`) and no longer
   names the topic. A bucket whose `Notifications` call failed is never scanned,

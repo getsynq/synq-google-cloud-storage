@@ -162,10 +162,9 @@ func TestAnEdgeTheRunSawButDidNotPublishSurvives(t *testing.T) {
 	assert.Empty(t, edgeKeys(toDelete), "an edge the run saw but chose not to publish is still configured")
 }
 
-// TestABucketReadWithNoNotificationsLeftWithdrawsItsEdge is the other side of the
-// scope rule, and the reason it is not simply "never withdraw for a bucket that
-// published nothing": the bucket answered and named no topic, so the edge left
-// behind is genuinely stale.
+// TestABucketReadWithNoNotificationsLeftWithdrawsItsEdge is the mixed run: one
+// bucket still notifies, another answered and named nothing. The second bucket's
+// edge is stale even though this run published nothing for it.
 func TestABucketReadWithNoNotificationsLeftWithdrawsItsEdge(t *testing.T) {
 	desired := computed(edge("gcs::logs", "pubsub::prod.gcs.logs")).andRead("gcs::artefacts")
 	existing := []*entitiescustomv1.Relationship{
