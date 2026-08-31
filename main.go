@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 
 	entitiescustomv1grpc "buf.build/gen/go/getsynq/api/grpc/go/synq/entities/custom/v1/customv1grpc"
 	entitiescustomv1 "buf.build/gen/go/getsynq/api/protocolbuffers/go/synq/entities/custom/v1"
@@ -99,7 +100,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Setup logging and handle graceful shutdown
 	setupLogging(ctx)
-	handleShutdown(ctx, cancel)
+	defer handleShutdown(ctx, cancel)()
 
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Starting Google Cloud Storage integration")
@@ -201,16 +202,27 @@ type syncStats struct {
 // Configuration and Setup
 // ============================================================================
 
-// handleShutdown sets up graceful shutdown on interrupt signal
-func handleShutdown(ctx context.Context, cancel context.CancelFunc) {
+// handleShutdown cancels ctx on a shutdown signal, and returns a stop that
+// unregisters the handler.
+//
+// SIGTERM is here because that is how a container runtime or a Kubernetes
+// CronJob asks a sync to stop; registering only os.Interrupt left every
+// scheduled run to be killed outright rather than cancelled. Calling stop
+// matters for the same reason the goroutine watches ctx.Done(): neither should
+// outlive an ordinary run.
+func handleShutdown(ctx context.Context, cancel context.CancelFunc) (stop func()) {
 	logger := slog.Default()
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt)
-		<-sigChan
-		logger.InfoContext(ctx, "Received interrupt signal, shutting down...")
-		cancel()
+		select {
+		case sig := <-sigChan:
+			logger.InfoContext(ctx, "Received shutdown signal, shutting down...", slog.String("signal", sig.String()))
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
+	return func() { signal.Stop(sigChan) }
 }
 
 // buildFilters creates all filters from configuration
