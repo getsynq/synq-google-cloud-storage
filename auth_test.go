@@ -122,3 +122,27 @@ func TestAnOAuthURLMustBeHTTPS(t *testing.T) {
 
 	require.Error(t, err)
 }
+
+// TestALoopbackOAuthURLIsAllowed keeps a local authorization server usable: it
+// never puts the credentials on a network, and demanding a certificate for it
+// only teaches people to turn the check off.
+func TestALoopbackOAuthURLIsAllowed(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1:8080/oauth2/token",
+		"http://localhost:8080/oauth2/token",
+		"http://[::1]:8080/oauth2/token",
+	} {
+		got, err := tokenURL(qualityoauth.Target{}, raw)
+		require.NoError(t, err, raw)
+		assert.Equal(t, raw, got)
+	}
+}
+
+// TestAnOAuthURLOverridesTheDeployment keeps the reason the setting exists: a
+// self-hosted deployment can serve its authorization server from another host.
+func TestAnOAuthURLOverridesTheDeployment(t *testing.T) {
+	got, err := tokenURL(qualityoauth.Target{}, "https://auth.example.internal/oauth2/token")
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://auth.example.internal/oauth2/token", got)
+}

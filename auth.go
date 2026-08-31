@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 
 	qualityoauth "github.com/getsynq/quality-oauth-go"
@@ -141,19 +143,52 @@ func dialClientCredentials(
 	target qualityoauth.Target,
 	clientID, clientSecret string,
 ) (*grpc.ClientConn, error) {
-	// The token URL is derived from the deployment. A config file that spells one
-	// out explicitly still wins, because a self-hosted deployment can serve the
-	// authorization server from somewhere other than the API host.
-	tokenURL := qualityoauth.OAuthTokenURL(target)
-	if cfg.Quality.OAuthURL != "" {
-		tokenURL = cfg.Quality.OAuthURL
+	tokenEndpoint, err := tokenURL(target, cfg.Quality.OAuthURL)
+	if err != nil {
+		return nil, err
 	}
 	oauthConfig := &clientcredentials.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		TokenURL:     tokenURL,
+		TokenURL:     tokenEndpoint,
 	}
 	return dial(target, grpc.WithPerRPCCredentials(oauth.TokenSource{TokenSource: oauthConfig.TokenSource(ctx)}))
+}
+
+// tokenURL is where the client-credentials grant posts the client id and secret.
+// It is derived from the deployment; an override still wins, because a
+// self-hosted deployment can serve the authorization server from somewhere other
+// than the API host.
+//
+// The override must be https. It carries the credentials as form fields, and the
+// pair it carries is whichever one the run resolved — including one exported into
+// the environment by CI, which the config file naming the host never saw.
+// Loopback is excepted: a local authorization server never puts the credentials
+// on a network, and demanding a certificate for it only teaches people to turn
+// the check off.
+func tokenURL(target qualityoauth.Target, override string) (string, error) {
+	if override == "" {
+		return qualityoauth.OAuthTokenURL(target), nil
+	}
+	parsed, err := url.Parse(override)
+	if err != nil {
+		return "", fmt.Errorf("quality.oauth_url %q: %w", override, err)
+	}
+	if parsed.Scheme != "https" && !isLoopback(parsed.Hostname()) {
+		return "", fmt.Errorf(
+			"quality.oauth_url %q must use https: it carries the client id and secret, which this sync may have read from the environment",
+			override,
+		)
+	}
+	return override, nil
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func dial(target qualityoauth.Target, authOpt grpc.DialOption) (*grpc.ClientConn, error) {
