@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -40,19 +41,6 @@ func flagValue(name string) string {
 		return ""
 	}
 	return flag.Value.String()
-}
-
-// firstFlagValue reads the first of these flags the user typed. Every setting
-// that kept a deprecated alias needs this: viper cannot unmarshal a dashed
-// sub-key such as `synq.client-id` onto the `client_id` field it names, so an
-// alias reaches the config only by being read here.
-func firstFlagValue(names ...string) string {
-	for _, name := range names {
-		if value := flagValue(name); value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 type QualityConfig struct {
@@ -267,12 +255,16 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// The flags outrank the environment; the file values do not, so they are
 	// carried separately and resolved by the auth library.
+	//
+	// Every deprecated alias is read by name here. Viper cannot unmarshal a
+	// dashed sub-key such as `synq.client-id` onto the `client_id` field it
+	// names, so an alias that is not in this block resolves to nothing.
 	cfg.Quality.RegionFlag = flagValue("region")
-	cfg.Quality.EndpointFlag = firstFlagValue("endpoint", "synq.endpoint")
-	if id := firstFlagValue("client-id", "synq.client-id"); id != "" {
+	cfg.Quality.EndpointFlag = cmp.Or(flagValue("endpoint"), flagValue("synq.endpoint"))
+	if id := cmp.Or(flagValue("client-id"), flagValue("synq.client-id")); id != "" {
 		cfg.Quality.ClientID = id
 	}
-	if secret := firstFlagValue("client-secret", "synq.client-secret"); secret != "" {
+	if secret := cmp.Or(flagValue("client-secret"), flagValue("synq.client-secret")); secret != "" {
 		cfg.Quality.ClientSecret = secret
 	}
 	if url := flagValue("synq.oauth-url"); url != "" {
