@@ -63,8 +63,28 @@ type QualityConfig struct {
 	EndpointFlag string `mapstructure:"-"`
 }
 
+// hasCredential reports whether this section authenticates on its own. The two
+// kinds are alternatives, not fields to combine: `connect` prefers a client pair
+// over a token, so a section that supplies either has settled the question.
+func (q QualityConfig) hasCredential() bool {
+	return q.Token != "" || (q.ClientID != "" && q.ClientSecret != "")
+}
+
+// namesDeployment reports whether this section points at a deployment. Endpoint
+// and region are likewise alternatives: the endpoint wins where both are given.
+func (q QualityConfig) namesDeployment() bool {
+	return q.Endpoint != "" || q.Region != ""
+}
+
 // merge fills empty fields from a lower-precedence source, and reports which
 // deprecated keys were used so the caller can say so once.
+//
+// Credentials and the deployment are taken as a whole rather than field by
+// field. Merging those field-wise hands the outcome to the section that is meant
+// to lose: a legacy client pair beside a promoted token is the pair that
+// authenticates, and a legacy endpoint beside a promoted region is the endpoint
+// that is dialled. A half-filled promoted section is still completed from the
+// older one, which is what makes a split across the two sections keep working.
 func (q *QualityConfig) merge(older QualityConfig) []string {
 	var used []string
 	take := func(dst *string, src, name string) {
@@ -73,11 +93,15 @@ func (q *QualityConfig) merge(older QualityConfig) []string {
 			used = append(used, "synq."+name)
 		}
 	}
-	take(&q.ClientID, older.ClientID, "client_id")
-	take(&q.ClientSecret, older.ClientSecret, "client_secret")
-	take(&q.Token, older.Token, "token")
-	take(&q.Endpoint, older.Endpoint, "endpoint")
-	take(&q.Region, older.Region, "region")
+	if !q.hasCredential() {
+		take(&q.ClientID, older.ClientID, "client_id")
+		take(&q.ClientSecret, older.ClientSecret, "client_secret")
+		take(&q.Token, older.Token, "token")
+	}
+	if !q.namesDeployment() {
+		take(&q.Endpoint, older.Endpoint, "endpoint")
+		take(&q.Region, older.Region, "region")
+	}
 	take(&q.OAuthURL, older.OAuthURL, "oauth_url")
 	return used
 }

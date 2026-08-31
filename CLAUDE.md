@@ -101,6 +101,11 @@ everywhere.
   never arrives.
 - The `synq:` config section and the `--synq.*` flags are permanent aliases,
   merged in `config.QualityConfig.merge` as the lower-precedence source.
+- That merge takes credentials and the deployment whole, not field by field.
+  Both are pairs of alternatives — `connect` prefers a client pair over a token,
+  `resolveTarget` prefers an endpoint over a region — so a field-wise merge lets
+  the section that is meant to lose decide. A half-filled `quality:` section is
+  still completed from `synq:`.
 
 ### Relationship reconciliation — a run only withdraws what it computed
 
