@@ -308,9 +308,12 @@ func LoadConfig(configPath string) (*Config, error) {
 		cfg.GCP.EntityGroupID = fmt.Sprintf("gcs::%s", cfg.GCP.ProjectID)
 	}
 
-	// Validate required fields
+	// Validate required fields. The parsed config is returned alongside the
+	// error: what fails here is what a sync needs, and an auth subcommand needs
+	// only the deployment, which parsed fine. Callers that need a valid config
+	// must still check the error.
 	if err := validateConfig(cfg); err != nil {
-		return nil, err
+		return cfg, err
 	}
 
 	return cfg, nil

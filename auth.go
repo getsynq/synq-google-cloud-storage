@@ -66,13 +66,22 @@ func authApp() qualityoauth.App {
 // the ambient environment is the library's ordering, not this tool's, and
 // `TestTheConfigFileOutranksTheEnvironment` pins it.
 func resolveTarget(cfg *config.Config) (qualityoauth.Target, error) {
+	// A flag naming a deployment is the user overriding the file, which is the
+	// one case where a bad quality.region must not be fatal: refusing there makes
+	// the typo unfixable except by editing the file it is in.
+	typed := cfg.Quality.RegionFlag != "" || cfg.Quality.EndpointFlag != ""
+
 	configured := cfg.Quality.Endpoint
 	if configured == "" && cfg.Quality.Region != "" {
 		target, err := qualityoauth.TargetForRegion(cfg.Quality.Region)
-		if err != nil {
+		switch {
+		case err == nil:
+			configured = target.Endpoint
+		case typed:
+			slog.Default().Warn("Ignoring quality.region in the config file", slog.String("error", err.Error()))
+		default:
 			return qualityoauth.Target{}, fmt.Errorf("quality.region in the config file: %w", err)
 		}
-		configured = target.Endpoint
 	}
 	return qualityoauth.Sources{
 		RegionFlag:         cfg.Quality.RegionFlag,
@@ -342,9 +351,14 @@ func targetFromCommand(cmd *cobra.Command) (qualityoauth.Target, error) {
 	configPath, _ := cmd.Flags().GetString("config")
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		// A sync needs a GCP project; logging in does not. Fall back to the
-		// deployment sources that do not depend on the file parsing.
+		// A sync needs a GCP project; logging in does not, so the validation
+		// error is a warning here. The parsed file comes back with it and is
+		// still the best answer available.
 		_, _ = fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	if cfg == nil {
+		// The file could not be parsed at all, so there is nothing to resolve
+		// from beyond the flags the library reads for itself.
 		return qualityoauth.Sources{}.Resolve()
 	}
 	return resolveTarget(cfg)
