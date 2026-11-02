@@ -31,3 +31,6 @@ config.yaml
 # Binary
 synq-google-cloud-storage
 .DS_Store
+
+# GoReleaser output
+dist/
