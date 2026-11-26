@@ -17,6 +17,7 @@ import (
 	entitiescustomv1grpc "buf.build/gen/go/getsynq/api/grpc/go/synq/entities/custom/v1/customv1grpc"
 	entitiescustomv1 "buf.build/gen/go/getsynq/api/protocolbuffers/go/synq/entities/custom/v1"
 	entitiesv1 "buf.build/gen/go/getsynq/api/protocolbuffers/go/synq/entities/v1"
+	actorv1 "buf.build/gen/go/getsynq/api/protocolbuffers/go/synq/issues/actor/v1"
 	"cloud.google.com/go/storage"
 	"github.com/getsynq/synq-google-cloud-storage/config"
 	"github.com/joho/godotenv"
@@ -136,6 +137,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// One writer for every entity and type this run upserts, so the app names
+	// the tool and the project instead of the client id of the credential.
+	writer := writerActor(cfg.GCP.ProjectID)
+
 	// Setup clients
 	storageClient := mustCreateStorageClient(ctx, cfg)
 	defer func() {
@@ -154,11 +159,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}()
 
 		// Setup entity types in Coalesce Quality
-		mustSetupEntityTypes(ctx, cfg, qualityClients.types)
+		mustSetupEntityTypes(ctx, cfg, qualityClients.types, writer)
 	}
 
 	// Sync GCS resources to Coalesce Quality
-	stats := syncResources(ctx, cfg, storageClient, qualityClients, filters)
+	stats := syncResources(ctx, cfg, storageClient, qualityClients, filters, writer)
 
 	logger.InfoContext(ctx, "Sync completed successfully",
 		slog.Int("buckets", stats.Buckets),
@@ -298,7 +303,12 @@ func mustCreateQualityClients(ctx context.Context, cfg *config.Config) *qualityC
 // ============================================================================
 
 // mustSetupEntityTypes creates or updates the custom entity types
-func mustSetupEntityTypes(ctx context.Context, cfg *config.Config, typesClient entitiescustomv1grpc.TypesServiceClient) {
+func mustSetupEntityTypes(
+	ctx context.Context,
+	cfg *config.Config,
+	typesClient entitiescustomv1grpc.TypesServiceClient,
+	writer *actorv1.Actor,
+) {
 	logger := slog.Default()
 
 	// Load icon
@@ -314,13 +324,32 @@ func mustSetupEntityTypes(ctx context.Context, cfg *config.Config, typesClient e
 		slog.Int("bucket_type_id", int(cfg.Types.BucketTypeID)),
 	)
 
-	mustUpsertType(ctx, typesClient, cfg.Types.BucketTypeID, "Bucket", bucketIcon)
+	mustUpsertType(ctx, typesClient, writer, cfg.Types.BucketTypeID, "Bucket", bucketIcon)
 
 	logger.InfoContext(ctx, "Entity type created successfully")
 }
 
+// writerActor names this tool and the GCP project it syncs as the writer of
+// every entity and type it upserts. The app shows the name as "Last written by"
+// and warns a person that the next run overwrites an edit. No person runs the
+// sync, so the actor names no user. If an upsert sends no actor, the server
+// takes the writer from the token, and a client credential shows as its id.
+func writerActor(projectID string) *actorv1.Actor {
+	return &actorv1.Actor{
+		Name: fmt.Sprintf("synq-google-cloud-storage (%s)", projectID),
+		Via:  actorv1.Actor_VIA_API,
+	}
+}
+
 // mustUpsertType creates or updates a single entity type
-func mustUpsertType(ctx context.Context, client entitiescustomv1grpc.TypesServiceClient, typeID int32, name string, icon []byte) {
+func mustUpsertType(
+	ctx context.Context,
+	client entitiescustomv1grpc.TypesServiceClient,
+	writer *actorv1.Actor,
+	typeID int32,
+	name string,
+	icon []byte,
+) {
 	logger := slog.Default()
 
 	_, err := client.UpsertType(ctx, &entitiescustomv1.UpsertTypeRequest{
@@ -329,6 +358,7 @@ func mustUpsertType(ctx context.Context, client entitiescustomv1grpc.TypesServic
 			Name:    name,
 			SvgIcon: icon,
 		},
+		Actor: writer,
 	})
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to create entity type", slog.String("name", name), slog.String("error", err.Error()))
@@ -408,7 +438,14 @@ func validateSVG(data []byte) error {
 // ============================================================================
 
 // syncResources publishes every GCS resource
-func syncResources(ctx context.Context, cfg *config.Config, storageClient *storage.Client, clients *qualityClients, filters *filters) syncStats {
+func syncResources(
+	ctx context.Context,
+	cfg *config.Config,
+	storageClient *storage.Client,
+	clients *qualityClients,
+	filters *filters,
+	writer *actorv1.Actor,
+) syncStats {
 	var entitiesClient entitiescustomv1grpc.EntitiesServiceClient
 	if clients != nil {
 		entitiesClient = clients.entities
@@ -434,6 +471,7 @@ func syncResources(ctx context.Context, cfg *config.Config, storageClient *stora
 		filters.buckets,
 		filters.relationships,
 		customEntities,
+		writer,
 	)
 
 	// Manage relationships and entity groups only if not in dry-run mode
@@ -459,6 +497,7 @@ func syncBuckets(
 	bucketFilter Filter,
 	relationshipFilter Filter,
 	customEntities map[string]bool,
+	writer *actorv1.Actor,
 ) ([]*entitiesv1.Identifier, int, desiredRelationships) {
 	logger := slog.Default()
 	logger.InfoContext(ctx, "Scanning GCS buckets")
@@ -507,7 +546,7 @@ func syncBuckets(
 		// Build annotations from bucket attributes and labels
 		annotations := buildBucketAnnotations(bucketAttrs)
 
-		mustUpsertEntity(ctx, entitiesClient, bucketID, cfg.Types.BucketTypeID, bucketAttrs.Name, description, annotations)
+		mustUpsertEntity(ctx, entitiesClient, writer, bucketID, cfg.Types.BucketTypeID, bucketAttrs.Name, description, annotations)
 
 		// Scan bucket notifications to create relationships to Pub/Sub topics
 		if cfg.Relationships.Enabled {
@@ -764,6 +803,7 @@ func ownsRelationship(rel *entitiescustomv1.Relationship) bool {
 func mustUpsertEntity(
 	ctx context.Context,
 	client entitiescustomv1grpc.EntitiesServiceClient,
+	writer *actorv1.Actor,
 	id *entitiesv1.Identifier,
 	typeID int32,
 	name string,
@@ -792,6 +832,7 @@ func mustUpsertEntity(
 			Annotations: annotations,
 			CreatedAt:   timestamppb.Now(),
 		},
+		Actor: writer,
 	})
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to create entity", slog.String("name", name), slog.String("error", err.Error()))

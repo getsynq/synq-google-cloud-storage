@@ -139,6 +139,18 @@ letting `deduplicateRelationships` infer intent from an empty set.
 the first form of this bug in a version that fired by default and deleted seven
 edges from a live workspace.
 
+### Writer actor
+
+`writerActor` builds one `Actor` at the start of `runSync`. The name is
+`synq-google-cloud-storage (<GCP project>)`, `via` is `VIA_API`, and `user` is
+empty, as no person runs the sync.
+
+- Send the actor on every `UpsertEntity` and `UpsertType` call.
+- If a call sends no actor, the server takes the writer from the token. The app
+  then shows the client id of the credential.
+- Relationship, feature and group writes take no actor in v1.
+- `writer_test.go` records the requests with a stub client and checks the actor.
+
 ## Key Implementation Details
 
 - Buckets use simple identifiers: `gcs::<bucket_name>`
