@@ -420,6 +420,8 @@ The integration consists of three main components:
 
 **Custom Identifiers:** All entities use custom identifiers with `gcs::` prefix for namespace isolation. Buckets use identifiers in the format: `gcs::<bucket_name>`.
 
+**Writer:** Each bucket entity and the Bucket type record `synq-google-cloud-storage (<project_id>)` as their writer. The app shows this name as "Last written by". It warns a person who edits a bucket in the app that the next sync run overwrites the edit.
+
 ## Development
 
 ### Running Tests
